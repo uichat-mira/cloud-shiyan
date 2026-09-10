@@ -1,0 +1,170 @@
+name: Import effective legacy dev baseline
+
+on:
+  push:
+    branches:
+      - feat/correct-effective-dev-baseline
+    paths:
+      - .github/workflows/import-effective-dev.yml
+
+permissions:
+  contents: write
+
+jobs:
+  import:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/correct-effective-dev-baseline
+          fetch-depth: 0
+
+      - name: Import effective legacy dev source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch dev https://github.com/dangjingtao/mira-shiyan-cloud.git /tmp/legacy
+          test "$(git -C /tmp/legacy rev-parse HEAD)" = "03e8c12db80c1f879da2aabf268d5b5e0769c01a"
+
+          rm -rf migrations src tests
+          cp -R /tmp/legacy/migrations ./migrations
+          cp -R /tmp/legacy/src ./src
+          cp -R /tmp/legacy/tests ./tests
+          cp /tmp/legacy/package.json ./package.json
+
+      - name: Collapse LLM deployment boundary without changing business contracts
+        shell: python
+        run: |
+          from pathlib import Path
+          import json
+
+          # Keep the old Mob020 call shape small and explicit, but make LLM an
+          # in-process logical service rather than a Cloudflare Service Binding.
+          for root in (Path('src'), Path('tests')):
+              for path in root.rglob('*.ts'):
+                  text = path.read_text()
+                  text = text.replace('SHIYAN_LLM', 'LLM')
+                  path.write_text(text)
+
+          api = Path('src/api/index.ts')
+          text = api.read_text()
+          text = text.replace(
+              "import { handleMob022Request } from './mob022';\n",
+              "import { handleMob022Request } from './mob022';\nimport { createShiyanLlmService } from '../llm/index';\n",
+          )
+          text = text.replace(
+              "import type { ShiyanLlmBinding } from '../shared/llm';\n",
+              "import type { ShiyanLlmBinding } from '../shared/llm';\nimport type { LlmEnvLike } from '../shared/llmGateway';\n",
+          )
+          text = text.replace('interface Env {', 'interface Env extends LlmEnvLike {', 1)
+          text = text.replace('  LLM: ShiyanLlmBinding;\n', '', 1)
+          marker = 'const TASK_ID_PATTERN =\n'
+          helper = """type RuntimeEnv = Env & { LLM: ShiyanLlmBinding };\n\nconst withLlm = (env: Env): RuntimeEnv => ({\n  ...env,\n  LLM: createShiyanLlmService(env),\n});\n\n"""
+          if marker not in text:
+              raise SystemExit('TASK_ID_PATTERN marker missing')
+          text = text.replace(marker, helper + marker, 1)
+          text = text.replace(
+              'runMob020Organize(this.env, event.payload, step)',
+              'runMob020Organize(withLlm(this.env), event.payload, step)',
+          )
+          text = text.replace(
+              'handleMob020Request(request, env, device, requestId)',
+              'handleMob020Request(request, withLlm(env), device, requestId)',
+          )
+          text = text.replace("service: 'shiyan-api'", "service: 'mira-shiyan'")
+          api.write_text(text)
+
+          llm = Path('src/llm/index.ts')
+          llm.write_text("""import type {\n  AdjustRequest,\n  LlmOutcome,\n  OrganizeRequest,\n  ShiyanLlmBinding,\n} from '../shared/llm';\nimport { ShiyanLlmGateway, resolveLlmSlots, type LlmEnvLike } from '../shared/llmGateway';\n\nexport type { AdjustRequest, LlmOutcome, OrganizeRequest } from '../shared/llm';\n\n/**\n * In-process LLM service boundary for Cloud Shiyan.\n *\n * Provider configuration and keys remain runtime bindings/secrets owned by\n * this module. The business layer receives only normalized LLM outcomes.\n * Keeping this contract independent of D1/CaptureTask state preserves a clean\n * extraction point if a real isolation or reuse requirement later justifies a\n * separate deployment unit again.\n */\nexport function createShiyanLlmService(env: LlmEnvLike): ShiyanLlmBinding {\n  const gateway = new ShiyanLlmGateway(resolveLlmSlots(env));\n  return {\n    generateStructured(input: OrganizeRequest): Promise<LlmOutcome> {\n      return gateway.generateStructured(input);\n    },\n    adjustDraft(input: AdjustRequest): Promise<LlmOutcome> {\n      return gateway.adjustDraft(input);\n    },\n  };\n}\n""")
+
+          shared_llm = Path('src/shared/llm.ts')
+          text = shared_llm.read_text()
+          text = text.replace(
+              'Service Binding contract between `shiyan-api` and the private `shiyan-llm`\n * Worker. The LLM Worker never touches D1: callers pass the scene spec and\n * transcript evidence, and the Worker answers with normalized outcomes so\n * provider errors never leak raw upstream bodies or keys to clients.',
+              'Logical service contract between Shiyan business stages and the LLM module.\n * The LLM module never touches D1: callers pass the scene spec and transcript\n * evidence, and it answers with normalized outcomes so provider errors never\n * leak raw upstream bodies or keys to clients.',
+          )
+          shared_llm.write_text(text)
+
+          pkg_path = Path('package.json')
+          pkg = json.loads(pkg_path.read_text())
+          pkg['name'] = '@uichat-mira/cloud-shiyan'
+          pkg['scripts'] = {
+              'types': 'wrangler types worker-configuration.d.ts -c wrangler.jsonc',
+              'typecheck': 'npm run types && tsc -p tsconfig.json',
+              'test': 'tsx --test tests/stt.test.ts tests/mob019.workflow.test.ts tests/mob020.llm.test.ts tests/mob020.organize.test.ts tests/mob022.destination.test.ts tests/mob022.delivery.test.ts',
+              'dry-run': 'wrangler deploy --dry-run -c wrangler.jsonc',
+              'check': 'npm run typecheck && npm test && npm run dry-run',
+          }
+          pkg_path.write_text(json.dumps(pkg, ensure_ascii=False, indent=2) + '\n')
+
+          Path('wrangler.jsonc').write_text("""{\n  \"$schema\": \"node_modules/wrangler/config-schema.json\",\n  \"name\": \"mira-shiyan\",\n  \"main\": \"src/api/index.ts\",\n  \"compatibility_date\": \"2026-08-29\",\n  \"keep_vars\": true,\n  \"observability\": { \"enabled\": true },\n  \"vars\": {\n    \"R2_BUCKET_NAME\": \"mira-shiyan-audio\",\n    \"UPLOAD_TTL_SECONDS\": \"900\",\n    \"LLM_TIMEOUT_MS\": \"120000\",\n    \"LLM_MAX_TRANSCRIPT_CHARS\": \"200000\"\n  },\n  \"ai\": {\n    \"binding\": \"AI\"\n  },\n  \"triggers\": {\n    \"crons\": [\"0 * * * *\"]\n  },\n  \"d1_databases\": [\n    {\n      \"binding\": \"DB\",\n      \"database_name\": \"mira-shiyan\",\n      \"database_id\": \"REPLACE_WITH_D1_DATABASE_ID\",\n      \"migrations_dir\": \"migrations\"\n    }\n  ],\n  \"r2_buckets\": [\n    {\n      \"binding\": \"AUDIO\",\n      \"bucket_name\": \"mira-shiyan-audio\"\n    }\n  ],\n  \"workflows\": [\n    {\n      \"binding\": \"CAPTURE_WORKFLOW\",\n      \"name\": \"mira-shiyan-capture\",\n      \"class_name\": \"ShiyanCaptureWorkflow\"\n    }\n  ]\n}\n""")
+
+          # These represented the replaced dual-deployment topology and must not
+          # survive the clean Organization runtime.
+          for old in ('wrangler.api.jsonc', 'wrangler.llm.jsonc'):
+              Path(old).unlink(missing_ok=True)
+
+      - name: Update Organization CI for full effective baseline
+        shell: bash
+        run: |
+          cat > .github/workflows/ci.yml <<'YAML'
+          name: Cloud Shiyan CI
+
+          on:
+            pull_request:
+            push:
+              branches: [dev, test, prod]
+
+          permissions:
+            contents: read
+
+          jobs:
+            validate:
+              runs-on: ubuntu-latest
+              steps:
+                - uses: actions/checkout@v4
+                - uses: actions/setup-node@v4
+                  with:
+                    node-version: '22'
+                - name: Install project dependencies
+                  run: npm install --no-audit --no-fund
+                - name: Generate Cloudflare runtime and binding types
+                  run: npm run types
+                - name: Typecheck
+                  run: npx tsc -p tsconfig.json
+                - name: Full inherited Shiyan test suite
+                  run: npm test
+                - name: Dry-run single Shiyan Worker
+                  run: npm run dry-run
+                - name: Reject obsolete two-Worker topology
+                  run: |
+                    test ! -e wrangler.api.jsonc
+                    test ! -e wrangler.llm.jsonc
+                    ! grep -R "mira-shiyan-llm" src wrangler.jsonc
+                    ! grep -q '"services"' wrangler.jsonc
+                - name: Verify D1 migrations
+                  run: |
+                    sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
+                    sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
+                    sqlite3 /tmp/shiyan.db < migrations/0002_stt_transcript.sql
+                    sqlite3 /tmp/shiyan.db < migrations/0004_delivery_records.sql
+                    sqlite3 /tmp/shiyan.db < migrations/0005_llm_organization.sql
+                    sqlite3 /tmp/shiyan.db < migrations/0005_llm_organization.sql
+                    sqlite3 /tmp/shiyan.db '.schema transcripts'
+                    sqlite3 /tmp/shiyan.db '.schema transcript_segments'
+                    sqlite3 /tmp/shiyan.db '.schema delivery_records'
+                    sqlite3 /tmp/shiyan.db '.schema drafts'
+                    sqlite3 /tmp/shiyan.db '.schema scenes'
+                    sqlite3 /tmp/shiyan.db 'PRAGMA table_info(audio_assets);'
+          YAML
+
+      - name: Commit corrected baseline
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "Mira Organization"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          git status --short
+          git commit -m "fix: inherit effective Shiyan dev baseline"
+          git push origin HEAD:feat/correct-effective-dev-baseline
