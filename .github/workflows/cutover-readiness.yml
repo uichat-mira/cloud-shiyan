@@ -72,6 +72,13 @@ jobs:
               jq -r '.result.bindings[]? | select((.name // "") | startswith("LLM_")) | "  \(.name)=PRESENT type=\(.type)"' "$file"
             else
               jq -r '.result.bindings[]? | select((.name // "") | test("^(DEVICE_AUTH_PEPPER|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|GITHUB_DESTINATION_TOKEN)$")) | "  \(.name)=PRESENT type=\(.type)"' "$file"
+              echo "  GitHub Destination routing bindings:"
+              destination_names=$(jq -r '.result.bindings[]? | select((.name // "") | startswith("GITHUB_DESTINATION_")) | "    \(.name)=PRESENT type=\(.type)"' "$file")
+              if [ -n "$destination_names" ]; then
+                printf '%s\n' "$destination_names"
+              else
+                echo "    none"
+              fi
             fi
           done
 
