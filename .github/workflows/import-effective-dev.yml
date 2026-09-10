@@ -38,8 +38,6 @@ jobs:
           from pathlib import Path
           import json
 
-          # Keep the old Mob020 call shape small and explicit, but make LLM an
-          # in-process logical service rather than a Cloudflare Service Binding.
           for root in (Path('src'), Path('tests')):
               for path in root.rglob('*.ts'):
                   text = path.read_text()
@@ -74,8 +72,7 @@ jobs:
           text = text.replace("service: 'shiyan-api'", "service: 'mira-shiyan'")
           api.write_text(text)
 
-          llm = Path('src/llm/index.ts')
-          llm.write_text("""import type {\n  AdjustRequest,\n  LlmOutcome,\n  OrganizeRequest,\n  ShiyanLlmBinding,\n} from '../shared/llm';\nimport { ShiyanLlmGateway, resolveLlmSlots, type LlmEnvLike } from '../shared/llmGateway';\n\nexport type { AdjustRequest, LlmOutcome, OrganizeRequest } from '../shared/llm';\n\n/**\n * In-process LLM service boundary for Cloud Shiyan.\n *\n * Provider configuration and keys remain runtime bindings/secrets owned by\n * this module. The business layer receives only normalized LLM outcomes.\n * Keeping this contract independent of D1/CaptureTask state preserves a clean\n * extraction point if a real isolation or reuse requirement later justifies a\n * separate deployment unit again.\n */\nexport function createShiyanLlmService(env: LlmEnvLike): ShiyanLlmBinding {\n  const gateway = new ShiyanLlmGateway(resolveLlmSlots(env));\n  return {\n    generateStructured(input: OrganizeRequest): Promise<LlmOutcome> {\n      return gateway.generateStructured(input);\n    },\n    adjustDraft(input: AdjustRequest): Promise<LlmOutcome> {\n      return gateway.adjustDraft(input);\n    },\n  };\n}\n""")
+          Path('src/llm/index.ts').write_text("""import type {\n  AdjustRequest,\n  LlmOutcome,\n  OrganizeRequest,\n  ShiyanLlmBinding,\n} from '../shared/llm';\nimport { ShiyanLlmGateway, resolveLlmSlots, type LlmEnvLike } from '../shared/llmGateway';\n\nexport type { AdjustRequest, LlmOutcome, OrganizeRequest } from '../shared/llm';\n\n/**\n * In-process LLM service boundary for Cloud Shiyan.\n *\n * Provider configuration and keys remain runtime bindings/secrets owned by\n * this module. The business layer receives only normalized LLM outcomes.\n * Keeping this contract independent of D1/CaptureTask state preserves a clean\n * extraction point if a real isolation or reuse requirement later justifies a\n * separate deployment unit again.\n */\nexport function createShiyanLlmService(env: LlmEnvLike): ShiyanLlmBinding {\n  const gateway = new ShiyanLlmGateway(resolveLlmSlots(env));\n  return {\n    generateStructured(input: OrganizeRequest): Promise<LlmOutcome> {\n      return gateway.generateStructured(input);\n    },\n    adjustDraft(input: AdjustRequest): Promise<LlmOutcome> {\n      return gateway.adjustDraft(input);\n    },\n  };\n}\n""")
 
           shared_llm = Path('src/shared/llm.ts')
           text = shared_llm.read_text()
@@ -99,8 +96,6 @@ jobs:
 
           Path('wrangler.jsonc').write_text("""{\n  \"$schema\": \"node_modules/wrangler/config-schema.json\",\n  \"name\": \"mira-shiyan\",\n  \"main\": \"src/api/index.ts\",\n  \"compatibility_date\": \"2026-08-29\",\n  \"keep_vars\": true,\n  \"observability\": { \"enabled\": true },\n  \"vars\": {\n    \"R2_BUCKET_NAME\": \"mira-shiyan-audio\",\n    \"UPLOAD_TTL_SECONDS\": \"900\",\n    \"LLM_TIMEOUT_MS\": \"120000\",\n    \"LLM_MAX_TRANSCRIPT_CHARS\": \"200000\"\n  },\n  \"ai\": {\n    \"binding\": \"AI\"\n  },\n  \"triggers\": {\n    \"crons\": [\"0 * * * *\"]\n  },\n  \"d1_databases\": [\n    {\n      \"binding\": \"DB\",\n      \"database_name\": \"mira-shiyan\",\n      \"database_id\": \"REPLACE_WITH_D1_DATABASE_ID\",\n      \"migrations_dir\": \"migrations\"\n    }\n  ],\n  \"r2_buckets\": [\n    {\n      \"binding\": \"AUDIO\",\n      \"bucket_name\": \"mira-shiyan-audio\"\n    }\n  ],\n  \"workflows\": [\n    {\n      \"binding\": \"CAPTURE_WORKFLOW\",\n      \"name\": \"mira-shiyan-capture\",\n      \"class_name\": \"ShiyanCaptureWorkflow\"\n    }\n  ]\n}\n""")
 
-          # These represented the replaced dual-deployment topology and must not
-          # survive the clean Organization runtime.
           for old in ('wrangler.api.jsonc', 'wrangler.llm.jsonc'):
               Path(old).unlink(missing_ok=True)
 
@@ -164,6 +159,9 @@ jobs:
           set -euo pipefail
           git config user.name "Mira Organization"
           git config user.email "actions@users.noreply.github.com"
+          # The GitHub Actions token cannot update workflow files. CI is updated
+          # separately through the repository connector after this source import.
+          git restore .github/workflows/ci.yml
           git add -A
           git status --short
           git commit -m "fix: inherit effective Shiyan dev baseline"
