@@ -1,0 +1,24 @@
+{
+  "name": "@uichat-mira/cloud-shiyan",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "types": "wrangler types worker-configuration.d.ts -c wrangler.jsonc",
+    "typecheck": "npm run types && tsc -p tsconfig.json",
+    "test": "tsx --test tests/stt.test.ts tests/mob019.workflow.test.ts tests/mob020.llm.test.ts tests/mob020.organize.test.ts tests/mob022.destination.test.ts tests/mob022.delivery.test.ts",
+    "dry-run": "wrangler deploy --dry-run -c wrangler.jsonc",
+    "check": "npm run typecheck && npm test && npm run dry-run"
+  },
+  "dependencies": {
+    "@ai-sdk/openai-compatible": "2.0.73",
+    "ai": "6.0.270"
+  },
+  "devDependencies": {
+    "tsx": "4.20.5",
+    "typescript": "5.9.2",
+    "wrangler": "4.79.0"
+  }
+}

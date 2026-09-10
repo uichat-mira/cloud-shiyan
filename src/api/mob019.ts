@@ -59,7 +59,7 @@ export interface Mob019WorkflowPayload {
   taskId: string;
   objectKey: string;
   requestId?: string;
-  startStage?: 'verify-audio' | 'transcribe';
+  startStage?: 'verify-audio' | 'transcribe' | 'organize';
   initialPrompt?: string;
 }
 
@@ -836,7 +836,7 @@ export async function runMob019Workflow(
   env: Mob019Env,
   payload: Mob019WorkflowPayload,
   step: Mob019WorkflowStep,
-): Promise<void> {
+): Promise<{ ok: boolean }> {
   if (payload.startStage !== 'transcribe') {
     const verified = await step.do('verify-audio', async () => {
       await markVerifyRunning(env, payload.taskId);
@@ -851,15 +851,16 @@ export async function runMob019Workflow(
       await markVerifySucceeded(env, payload.taskId);
       return { ok: true } as const;
     });
-    if (!verified.ok) return;
+    if (!verified.ok) return { ok: false };
   }
 
   const transcribed = await step.do('transcribe', () => runTranscribeStep(env, payload));
-  if (!transcribed.ok) return;
+  if (!transcribed.ok) return { ok: false };
 
-  await step.do('persist-transcript', () =>
+  const persisted = await step.do('persist-transcript', () =>
     runPersistTranscriptStep(env, payload, transcribed.artifactKey),
   );
+  return { ok: persisted.ok };
 }
 
 export async function cleanupExpiredAudio(

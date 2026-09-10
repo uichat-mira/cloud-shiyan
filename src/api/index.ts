@@ -7,7 +7,12 @@ import {
   type Mob019WorkflowPayload,
   type Mob019WorkflowStep,
 } from './mob019';
+import { handleMob020Request, runMob020Organize } from './mob020';
+import { handleMob022Request } from './mob022';
+import { createShiyanLlmService } from '../llm/index';
 import { createPresignedR2PutUrl } from '../shared/r2Presign';
+import type { ShiyanLlmBinding } from '../shared/llm';
+import type { LlmEnvLike } from '../shared/llmGateway';
 import type {
   ApiEnvelope,
   CaptureStageView,
@@ -62,7 +67,7 @@ interface WorkflowBindingLike {
   get(id: string): Promise<unknown>;
 }
 
-interface Env {
+interface Env extends LlmEnvLike {
   DB: D1DatabaseLike;
   AUDIO: R2BucketLike;
   AI: {
@@ -75,6 +80,11 @@ interface Env {
   R2_BUCKET_NAME: string;
   UPLOAD_TTL_SECONDS: string;
   DEVICE_AUTH_PEPPER: string;
+  GITHUB_DESTINATION_TOKEN: string;
+  GITHUB_DESTINATION_OWNER?: string;
+  GITHUB_DESTINATION_REPOSITORY?: string;
+  GITHUB_DESTINATION_BRANCH?: string;
+  GITHUB_DESTINATION_ROOT?: string;
 }
 
 interface DeviceRow {
@@ -118,6 +128,13 @@ interface AssetRow {
   upload_expires_at: string;
   confirm_idempotency_key: string | null;
 }
+
+type RuntimeEnv = Env & { LLM: ShiyanLlmBinding };
+
+const withLlm = (env: Env): RuntimeEnv => ({
+  ...env,
+  LLM: createShiyanLlmService(env),
+});
 
 const TASK_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
@@ -599,7 +616,16 @@ export class ShiyanCaptureWorkflow extends WorkflowEntrypoint<Env, Mob019Workflo
     event: { payload: Mob019WorkflowPayload },
     step: Mob019WorkflowStep,
   ): Promise<void> {
-    await runMob019Workflow(this.env, event.payload, step);
+    // Organize retries skip the STT chain entirely: the Transcript evidence
+    // layer is already persisted and must never be re-run or overwritten.
+    if (event.payload.startStage === 'organize') {
+      await runMob020Organize(withLlm(this.env), event.payload, step);
+      return;
+    }
+
+    const stt = await runMob019Workflow(this.env, event.payload, step);
+    if (!stt.ok) return;
+    await runMob020Organize(withLlm(this.env), event.payload, step);
   }
 }
 
@@ -641,6 +667,12 @@ export default {
 
     const mob019Response = await handleMob019Request(request, env, device, requestId);
     if (mob019Response) return mob019Response;
+
+    const mob020Response = await handleMob020Request(request, withLlm(env), device, requestId);
+    if (mob020Response) return mob020Response;
+
+    const mob022Response = await handleMob022Request(request, env, device, requestId);
+    if (mob022Response) return mob022Response;
 
     return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
   },
