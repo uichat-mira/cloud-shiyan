@@ -25,7 +25,7 @@ mira-shiyan-api   (stable deployed Worker name)
 
 The repository/service is Cloud Shiyan; retaining the deployed Worker name `mira-shiyan-api` is an operational compatibility choice, not a second architectural service. It preserves the existing custom domain and API-owned runtime secrets during cutover. Renaming a healthy deployed Worker is not part of this migration.
 
-The former private `mira-shiyan-llm` deployment boundary is not carried forward. `src/llm/` remains a logical module boundary backed by the same `ShiyanLlmGateway`, provider-slot resolution, prompt/schema validation, fallback behavior, and normalized outcomes from the effective legacy `dev` implementation. It can be split again later if a real security, scaling, release, fault-isolation, or reuse requirement justifies another deployment unit.
+The former private `mira-shiyan-llm` deployment boundary is not carried forward. `src/llm/` remains a logical module boundary backed by the same `ShiyanLlmGateway`, prompt/schema validation, provider abstraction, and normalized outcomes from the effective legacy `dev` implementation. It can be split again later if a real security, scaling, release, fault-isolation, or reuse requirement justifies another deployment unit.
 
 ## Canonical product truth
 
@@ -66,18 +66,39 @@ Secret values are never stored in this repository. Read-only Cloudflare prefligh
 - `R2_ACCESS_KEY_ID`
 - `R2_SECRET_ACCESS_KEY`
 
-It also proved that the legacy `mira-shiyan-llm` Worker owns the current LLM configuration:
+### Shiyan business LLM configuration
 
-- `LLM_PRIMARY_PROVIDER`
-- `LLM_PRIMARY_BASE_URL`
-- `LLM_PRIMARY_MODEL`
-- `LLM_PRIMARY_API_KEY`
-- `LLM_TIMEOUT_MS`
-- `LLM_MAX_TRANSCRIPT_CHARS`
+Shiyan business inference is project-owned. The Organization-wide AI service does **not** execute Shiyan's product-specific AI workload.
 
-No fallback LLM slot is currently configured.
+The preferred runtime configuration is one Cloudflare Secret on `mira-shiyan-api`:
 
-The plain-text LLM settings can be read from the legacy Worker during a controlled preview/deploy workflow without logging their values. `LLM_PRIMARY_API_KEY` is a Cloudflare secret and cannot be read back for copying. Before the final single-Worker cutover, `mira-shiyan-api` must therefore receive a valid `LLM_PRIMARY_API_KEY` (the existing key re-entered or a rotated replacement). This is the remaining runtime-secret blocker.
+```text
+SHIYAN_LLM_CONFIG
+```
+
+Value:
+
+```json
+{
+  "provider": "openai-compatible",
+  "baseUrl": "https://provider.example.com/v1",
+  "model": "model-name",
+  "apiKey": "secret-key"
+}
+```
+
+`baseUrl`, `model`, and `apiKey` are required. `provider` is only an observability label and defaults to `openai-compatible` when omitted.
+
+When `SHIYAN_LLM_CONFIG` is present it is the sole provider source: legacy `LLM_PRIMARY_*` and `LLM_FALLBACK_*` variables are ignored. This prevents ambiguous mixed configuration. If the JSON secret is absent, the old variables remain temporarily supported for migration compatibility only.
+
+Timeout and transcript-size policy remain code/deployment configuration rather than operator-entered provider credentials:
+
+```text
+LLM_TIMEOUT_MS=120000
+LLM_MAX_TRANSCRIPT_CHARS=200000
+```
+
+Malformed or incomplete `SHIYAN_LLM_CONFIG` fails closed with a configuration diagnostic that never echoes the secret value.
 
 The existing Shiyan device credential remains a compatibility mechanism during bootstrap. It must not be promoted into the organization-wide authentication design. Cloud Shiyan is expected to converge on Mira Cloud shared identity while keeping service-specific authorization scoped to Shiyan.
 
@@ -91,22 +112,14 @@ feat/* -> dev -> test -> prod
 
 The empty repository was initialized on `prod` solely to establish the first Git ref. `dev` and `test` were created from that same bootstrap commit. Corrected implementation work merges first to `dev`; promotion then follows `dev -> test -> prod` with environment evidence at each step.
 
-CI validates:
-
-- project dependency installation;
-- generated Cloudflare runtime/binding types;
-- TypeScript;
-- the full inherited STT, Workflow, LLM organize/adjust, and Destination test suite;
-- single-Worker Wrangler dry-run;
-- absence of the obsolete `mira-shiyan-llm` deployment topology from the target config;
-- all inherited D1 migrations.
+CI validates static/deployability checks plus the Organization test layers used by this repository: T1 Unit, T2 Contract, and T3 Worker Runtime integration, aggregated by `Mira Gate`.
 
 ## Cutover strategy
 
 Production traffic is not the first live test. The migration uses Cloudflare Worker versions in two separate operations:
 
-1. build an effective config from the reviewed repository plus the legacy Worker's non-secret LLM settings;
-2. require all target runtime secrets, including `LLM_PRIMARY_API_KEY`;
+1. require the existing API/Destination secrets plus `SHIYAN_LLM_CONFIG` on `mira-shiyan-api`;
+2. run typecheck, T1/T2/T3 tests, migration replay checks, and Wrangler dry-run;
 3. upload a new `mira-shiyan-api` **version only** and obtain a preview URL;
 4. run health and authenticated Shiyan smoke tests against the preview version;
 5. only after preview acceptance, create a production deployment;
@@ -118,4 +131,4 @@ Production traffic is not the first live test. The migration uses Cloudflare Wor
 
 Repository/source convergence is tracked in [Issue #1](https://github.com/uichat-mira/cloud-shiyan/issues/1). Real Cloudflare preflight/cutover is tracked in [Issue #3](https://github.com/uichat-mira/cloud-shiyan/issues/3).
 
-Repository CI and the corrected `dev` branch are green. That proves the single-Worker source is internally valid, not that production has been cut over. Production completion still requires the LLM secret on the target Worker, preview acceptance, Mobile-to-Shiyan end-to-end smoke, Destination delivery, production deployment verification, and a confirmed rollback path before the legacy Worker is retired.
+Repository CI and the corrected `dev` branch are green. That proves the single-Worker source is internally valid, not that production has been cut over. Production completion still requires `SHIYAN_LLM_CONFIG` on the target Worker, preview acceptance, Mobile-to-Shiyan end-to-end smoke, Destination delivery, production deployment verification, and a confirmed rollback path before the legacy Worker is retired.
