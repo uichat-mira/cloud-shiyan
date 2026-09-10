@@ -23,6 +23,20 @@ jobs:
         run: npm run typecheck
       - name: Wrangler dry-run
         run: npm run dry-run
+      - name: Verify D1 migrations remain replay-safe
+        run: |
+          sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
+          sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
+          sqlite3 /tmp/shiyan.db < migrations/0002_stt_transcript.sql
+          sqlite3 /tmp/shiyan.db < migrations/0004_delivery_records.sql
+          sqlite3 /tmp/shiyan.db < migrations/0005_llm_organization.sql
+          sqlite3 /tmp/shiyan.db < migrations/0005_llm_organization.sql
+          sqlite3 /tmp/shiyan.db '.schema transcripts'
+          sqlite3 /tmp/shiyan.db '.schema transcript_segments'
+          sqlite3 /tmp/shiyan.db '.schema delivery_records'
+          sqlite3 /tmp/shiyan.db '.schema drafts'
+          sqlite3 /tmp/shiyan.db '.schema scenes'
+          sqlite3 /tmp/shiyan.db 'PRAGMA table_info(audio_assets);'
       - name: Reject obsolete two-Worker topology
         run: |
           test ! -e wrangler.api.jsonc
