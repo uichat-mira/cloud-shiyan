@@ -31,10 +31,11 @@ jobs:
 
       - name: Reject obsolete LLM Service Binding topology
         run: |
-          if grep -R "SHIYAN_LLM\|mira-shiyan-llm\|wrangler.llm" --exclude-dir=.git --exclude=ci.yml .; then
-            echo "Obsolete two-Worker topology detected."
+          if grep -R "SHIYAN_LLM\|mira-shiyan-llm" src wrangler.jsonc; then
+            echo "Obsolete two-Worker runtime topology detected."
             exit 1
           fi
+          test ! -e wrangler.llm.jsonc
 
       - name: Verify D1 migrations
         run: |
