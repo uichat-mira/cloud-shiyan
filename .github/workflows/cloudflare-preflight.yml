@@ -24,7 +24,7 @@ jobs:
           set -euo pipefail
           test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo "CLOUDFLARE_API_TOKEN is not visible to this repository"; exit 1; }
           test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo "CLOUDFLARE_ACCOUNT_ID is not visible to this repository"; exit 1; }
-          echo "Shared Cloudflare credentials are visible to cloud-shiyan." >> "$GITHUB_STEP_SUMMARY"
+          echo "Shared Cloudflare credentials are visible to cloud-shiyan." | tee -a "$GITHUB_STEP_SUMMARY"
 
       - name: Inspect Shiyan Cloudflare resources (read only)
         shell: bash
@@ -33,6 +33,10 @@ jobs:
           API="https://api.cloudflare.com/client/v4"
           AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
           ACCOUNT="${CLOUDFLARE_ACCOUNT_ID}"
+
+          say() {
+            printf '%s\n' "$1" | tee -a "$GITHUB_STEP_SUMMARY"
+          }
 
           cf_get() {
             local path="$1"
@@ -49,65 +53,65 @@ jobs:
             local title="$1"
             local code="$2"
             local file="$3"
-            echo "### ${title}" >> "$GITHUB_STEP_SUMMARY"
-            echo "Read failed (HTTP ${code})." >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.errors[]? | "- Cloudflare error \(.code): \(.message)"' "$file" >> "$GITHUB_STEP_SUMMARY" || true
-            echo >> "$GITHUB_STEP_SUMMARY"
+            say "### ${title}"
+            say "Read failed (HTTP ${code})."
+            jq -r '.errors[]? | "- Cloudflare error \(.code): \(.message)"' "$file" | tee -a "$GITHUB_STEP_SUMMARY" || true
+            say ""
           }
 
-          echo "## Shiyan Cloudflare read-only preflight" >> "$GITHUB_STEP_SUMMARY"
-          echo >> "$GITHUB_STEP_SUMMARY"
+          say "## Shiyan Cloudflare read-only preflight"
+          say ""
 
           workers_code=$(cf_get "/accounts/${ACCOUNT}/workers/scripts" /tmp/workers.json)
           if [ "$workers_code" = "200" ] && [ "$(jq -r '.success' /tmp/workers.json)" = "true" ]; then
-            echo "### Workers" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.result[] | select((.id // "") | test("shiyan"; "i")) | "- `\(.id)` — modified `\(.modified_on // "unknown")`, deployed from `\(.last_deployed_from // "unknown")`"' /tmp/workers.json >> "$GITHUB_STEP_SUMMARY"
+            say "### Workers"
+            jq -r '.result[] | select((.id // "") | test("shiyan"; "i")) | "- `\(.id)` — modified `\(.modified_on // "unknown")`, deployed from `\(.last_deployed_from // "unknown")`"' /tmp/workers.json | tee -a "$GITHUB_STEP_SUMMARY"
             if ! jq -e '.result[] | select((.id // "") | test("shiyan"; "i"))' /tmp/workers.json >/dev/null; then
-              echo "- No Worker with `shiyan` in its name was found." >> "$GITHUB_STEP_SUMMARY"
+              say '- No Worker with `shiyan` in its name was found.'
             fi
-            echo >> "$GITHUB_STEP_SUMMARY"
+            say ""
           else
             report_failure "Workers" "$workers_code" /tmp/workers.json
           fi
 
           d1_code=$(cf_get "/accounts/${ACCOUNT}/d1/database?name=mira-shiyan" /tmp/d1.json)
           if [ "$d1_code" = "200" ] && [ "$(jq -r '.success' /tmp/d1.json)" = "true" ]; then
-            echo "### D1" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.result[]? | "- `\(.name)` — uuid `\(.uuid)`"' /tmp/d1.json >> "$GITHUB_STEP_SUMMARY"
-            if [ "$(jq '.result | length' /tmp/d1.json)" = "0" ]; then echo "- `mira-shiyan` not found." >> "$GITHUB_STEP_SUMMARY"; fi
-            echo >> "$GITHUB_STEP_SUMMARY"
+            say "### D1"
+            jq -r '.result[]? | "- `\(.name)` — uuid `\(.uuid)`"' /tmp/d1.json | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$(jq '.result | length' /tmp/d1.json)" = "0" ]; then say '- `mira-shiyan` not found.'; fi
+            say ""
           else
             report_failure "D1" "$d1_code" /tmp/d1.json
           fi
 
           r2_code=$(cf_get "/accounts/${ACCOUNT}/r2/buckets?name_contains=mira-shiyan" /tmp/r2.json)
           if [ "$r2_code" = "200" ] && [ "$(jq -r '.success' /tmp/r2.json)" = "true" ]; then
-            echo "### R2" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.result.buckets[]? | "- `\(.name)` — created `\(.creation_date // "unknown")`"' /tmp/r2.json >> "$GITHUB_STEP_SUMMARY"
-            if [ "$(jq '.result.buckets | length' /tmp/r2.json)" = "0" ]; then echo "- No matching Shiyan bucket found." >> "$GITHUB_STEP_SUMMARY"; fi
-            echo >> "$GITHUB_STEP_SUMMARY"
+            say "### R2"
+            jq -r '.result.buckets[]? | "- `\(.name)` — created `\(.creation_date // "unknown")`"' /tmp/r2.json | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$(jq '.result.buckets | length' /tmp/r2.json)" = "0" ]; then say '- No matching Shiyan bucket found.'; fi
+            say ""
           else
             report_failure "R2" "$r2_code" /tmp/r2.json
           fi
 
           workflows_code=$(cf_get "/accounts/${ACCOUNT}/workflows?search=shiyan&per_page=100" /tmp/workflows.json)
           if [ "$workflows_code" = "200" ] && [ "$(jq -r '.success' /tmp/workflows.json)" = "true" ]; then
-            echo "### Workflows" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.result[]? | "- `\(.name)` — script `\(.script_name)`, class `\(.class_name)`"' /tmp/workflows.json >> "$GITHUB_STEP_SUMMARY"
-            if [ "$(jq '.result | length' /tmp/workflows.json)" = "0" ]; then echo "- No matching Shiyan Workflow found." >> "$GITHUB_STEP_SUMMARY"; fi
-            echo >> "$GITHUB_STEP_SUMMARY"
+            say "### Workflows"
+            jq -r '.result[]? | "- `\(.name)` — script `\(.script_name)`, class `\(.class_name)`"' /tmp/workflows.json | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$(jq '.result | length' /tmp/workflows.json)" = "0" ]; then say '- No matching Shiyan Workflow found.'; fi
+            say ""
           else
             report_failure "Workflows" "$workflows_code" /tmp/workflows.json
           fi
 
           domains_code=$(cf_get "/accounts/${ACCOUNT}/workers/domains" /tmp/domains.json)
           if [ "$domains_code" = "200" ] && [ "$(jq -r '.success' /tmp/domains.json)" = "true" ]; then
-            echo "### Worker custom domains" >> "$GITHUB_STEP_SUMMARY"
-            jq -r '.result[]? | select((.service // "") | test("shiyan"; "i")) | "- `\(.hostname)` -> `\(.service)` (zone `\(.zone_name)`)"' /tmp/domains.json >> "$GITHUB_STEP_SUMMARY"
+            say "### Worker custom domains"
+            jq -r '.result[]? | select((.service // "") | test("shiyan"; "i")) | "- `\(.hostname)` -> `\(.service)` (zone `\(.zone_name)`)"' /tmp/domains.json | tee -a "$GITHUB_STEP_SUMMARY"
             if ! jq -e '.result[]? | select((.service // "") | test("shiyan"; "i"))' /tmp/domains.json >/dev/null; then
-              echo "- No Shiyan custom domain found." >> "$GITHUB_STEP_SUMMARY"
+              say '- No Shiyan custom domain found.'
             fi
-            echo >> "$GITHUB_STEP_SUMMARY"
+            say ""
           else
             report_failure "Worker custom domains" "$domains_code" /tmp/domains.json
           fi
@@ -115,14 +119,14 @@ jobs:
           for worker in mira-shiyan-api mira-shiyan-llm; do
             if jq -e --arg worker "$worker" '.result[]? | select(.id == $worker)' /tmp/workers.json >/dev/null 2>&1; then
               settings_code=$(cf_get "/accounts/${ACCOUNT}/workers/scripts/${worker}/settings" "/tmp/${worker}-settings.json")
-              echo "### ${worker} binding names" >> "$GITHUB_STEP_SUMMARY"
+              say "### ${worker} binding names"
               if [ "$settings_code" = "200" ] && [ "$(jq -r '.success' "/tmp/${worker}-settings.json")" = "true" ]; then
-                jq -r '.result.bindings[]? | "- `\(.name // .binding // "unnamed")` — `\(.type // "unknown")`"' "/tmp/${worker}-settings.json" >> "$GITHUB_STEP_SUMMARY"
+                jq -r '.result.bindings[]? | "- `\(.name // .binding // "unnamed")` — `\(.type // "unknown")`"' "/tmp/${worker}-settings.json" | tee -a "$GITHUB_STEP_SUMMARY"
               else
-                echo "- Settings read failed (HTTP ${settings_code})." >> "$GITHUB_STEP_SUMMARY"
+                say "- Settings read failed (HTTP ${settings_code})."
               fi
-              echo >> "$GITHUB_STEP_SUMMARY"
+              say ""
             fi
           done
 
-          echo "Preflight used GET requests only; it did not deploy, mutate routes, or change resources." >> "$GITHUB_STEP_SUMMARY"
+          say "Preflight used GET requests only; it did not deploy, mutate routes, or change resources."
