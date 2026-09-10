@@ -67,7 +67,11 @@ jobs:
               continue
             fi
 
-            jq -r '.result.bindings[]? | select((.name // "") | test("^(DEVICE_AUTH_PEPPER|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|GITHUB_DESTINATION_TOKEN|LLM_PRIMARY_API_KEY|LLM_PRIMARY_PROVIDER|LLM_PRIMARY_BASE_URL|LLM_PRIMARY_MODEL|LLM_TIMEOUT_MS|LLM_MAX_TRANSCRIPT_CHARS)$")) | "  \(.name)=PRESENT type=\(.type)"' "$file"
+            if [ "$worker" = "mira-shiyan-llm" ]; then
+              jq -r '.result.bindings[]? | select((.name // "") | startswith("LLM_")) | "  \(.name)=PRESENT type=\(.type)"' "$file"
+            else
+              jq -r '.result.bindings[]? | select((.name // "") | test("^(DEVICE_AUTH_PEPPER|R2_ACCESS_KEY_ID|R2_SECRET_ACCESS_KEY|GITHUB_DESTINATION_TOKEN)$")) | "  \(.name)=PRESENT type=\(.type)"' "$file"
+            fi
           done
 
           echo "Readiness check used GET requests only and printed names/presence, never secret values."
