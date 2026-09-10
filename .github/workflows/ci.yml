@@ -9,26 +9,77 @@ permissions:
   contents: read
 
 jobs:
-  validate:
+  quality:
+    name: Static + Deployability
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
-      - name: Use npm 11
-        run: npm install --global npm@11
-
-      - name: Install project dependencies
-        run: npm install --no-audit --no-fund
-
-      - name: Run organization merge gate
-        run: npm run check
-
+      - run: npm install --global npm@11
+      - run: npm install --no-audit --no-fund
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Wrangler dry-run
+        run: npm run dry-run
       - name: Reject obsolete two-Worker topology
         run: |
           test ! -e wrangler.api.jsonc
           test ! -e wrangler.llm.jsonc
           ! grep -R "mira-shiyan-llm" src wrangler.jsonc
           ! grep -q '"services"' wrangler.jsonc
+
+  unit:
+    name: T1 Unit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global npm@11
+      - run: npm install --no-audit --no-fund
+      - run: npm run test:unit
+
+  contract:
+    name: T2 Contract
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global npm@11
+      - run: npm install --no-audit --no-fund
+      - run: npm run test:contract
+
+  runtime:
+    name: T3 Runtime
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - run: npm install --global npm@11
+      - run: npm install --no-audit --no-fund
+      - run: npm run test:integration
+
+  mira-gate:
+    name: Mira Gate
+    if: ${{ always() }}
+    needs: [quality, unit, contract, runtime]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all feature merge gates
+        env:
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          CONTRACT_RESULT: ${{ needs.contract.result }}
+          RUNTIME_RESULT: ${{ needs.runtime.result }}
+        run: |
+          test "$QUALITY_RESULT" = success
+          test "$UNIT_RESULT" = success
+          test "$CONTRACT_RESULT" = success
+          test "$RUNTIME_RESULT" = success
