@@ -22,6 +22,7 @@ jobs:
       ORG_R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       ORG_R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       ORG_GITHUB_DESTINATION_TOKEN: ${{ secrets.GITHUB_DESTINATION_TOKEN }}
+      WRANGLER_VERSION: '4.79.0'
     steps:
       - name: Check reusable GitHub secrets without exposing values
         shell: bash
@@ -75,3 +76,14 @@ jobs:
           done
 
           echo "Readiness check used GET requests only and printed names/presence, never secret values."
+
+      - name: Capture current deployment and version rollback anchors
+        shell: bash
+        run: |
+          set -euo pipefail
+          for worker in mira-shiyan-api mira-shiyan-llm; do
+            echo "=== ${worker} current deployment ==="
+            npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "$worker" --json
+            echo "=== ${worker} recent versions ==="
+            npx --yes wrangler@${WRANGLER_VERSION} versions list --name "$worker" --json | jq '.[0:3] | map({id, created_on, source, tag, message})'
+          done
