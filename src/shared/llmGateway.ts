@@ -30,6 +30,13 @@ export interface LlmGatewaySlots {
 }
 
 export interface LlmEnvLike {
+  /**
+   * Preferred Shiyan-owned business LLM configuration.
+   * Stored as one Cloudflare secret JSON value.
+   */
+  SHIYAN_LLM_CONFIG?: string;
+
+  // Legacy compatibility. Used only when SHIYAN_LLM_CONFIG is absent.
   LLM_PRIMARY_PROVIDER?: string;
   LLM_PRIMARY_BASE_URL?: string;
   LLM_PRIMARY_MODEL?: string;
@@ -38,6 +45,7 @@ export interface LlmEnvLike {
   LLM_FALLBACK_BASE_URL?: string;
   LLM_FALLBACK_MODEL?: string;
   LLM_FALLBACK_API_KEY?: string;
+
   LLM_TIMEOUT_MS?: string;
   LLM_MAX_TRANSCRIPT_CHARS?: string;
 }
@@ -50,7 +58,43 @@ const parsePositiveInt = (value: string | undefined, fallback: number): number =
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 };
 
-const resolveSlot = (
+const requiredConfigString = (
+  value: unknown,
+  field: 'baseUrl' | 'model' | 'apiKey',
+): string => {
+  if (typeof value !== 'string' || !value.trim()) {
+    throw new Error(`SHIYAN_LLM_CONFIG is invalid: ${field} must be a non-empty string`);
+  }
+  return value.trim();
+};
+
+const resolveShiyanConfig = (raw: string): LlmProviderSlot => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error('SHIYAN_LLM_CONFIG is invalid JSON');
+  }
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('SHIYAN_LLM_CONFIG is invalid: expected a JSON object');
+  }
+
+  const config = parsed as Record<string, unknown>;
+  const provider =
+    typeof config.provider === 'string' && config.provider.trim()
+      ? config.provider.trim()
+      : 'openai-compatible';
+
+  return {
+    provider,
+    baseUrl: requiredConfigString(config.baseUrl, 'baseUrl'),
+    model: requiredConfigString(config.model, 'model'),
+    apiKey: requiredConfigString(config.apiKey, 'apiKey'),
+  };
+};
+
+const resolveLegacySlot = (
   env: LlmEnvLike,
   role: 'PRIMARY' | 'FALLBACK',
 ): LlmProviderSlot | null => {
@@ -59,21 +103,35 @@ const resolveSlot = (
   const model = env[`LLM_${role}_MODEL`]?.trim();
   const apiKey = env[`LLM_${role}_API_KEY`]?.trim();
 
-  // Provider is only an observability label. A usable OpenAI-compatible slot
-  // needs endpoint + model + key; fallback may be left entirely unconfigured.
   if (!baseUrl || !model || !apiKey) return null;
   return { provider, baseUrl, model, apiKey };
 };
 
-export const resolveLlmSlots = (env: LlmEnvLike): LlmGatewaySlots => ({
-  primary: resolveSlot(env, 'PRIMARY'),
-  fallback: resolveSlot(env, 'FALLBACK'),
-  timeoutMs: parsePositiveInt(env.LLM_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
-  maxTranscriptChars: parsePositiveInt(
-    env.LLM_MAX_TRANSCRIPT_CHARS,
-    DEFAULT_MAX_TRANSCRIPT_CHARS,
-  ),
-});
+export const resolveLlmSlots = (env: LlmEnvLike): LlmGatewaySlots => {
+  const shared = {
+    timeoutMs: parsePositiveInt(env.LLM_TIMEOUT_MS, DEFAULT_TIMEOUT_MS),
+    maxTranscriptChars: parsePositiveInt(
+      env.LLM_MAX_TRANSCRIPT_CHARS,
+      DEFAULT_MAX_TRANSCRIPT_CHARS,
+    ),
+  };
+
+  // Presence of the JSON secret selects the new configuration mode completely.
+  // Legacy primary/fallback variables cannot silently override or extend it.
+  if (env.SHIYAN_LLM_CONFIG !== undefined) {
+    return {
+      primary: resolveShiyanConfig(env.SHIYAN_LLM_CONFIG),
+      fallback: null,
+      ...shared,
+    };
+  }
+
+  return {
+    primary: resolveLegacySlot(env, 'PRIMARY'),
+    fallback: resolveLegacySlot(env, 'FALLBACK'),
+    ...shared,
+  };
+};
 
 const invalidRequest = (message: string): LlmOutcome => ({
   ok: false,
@@ -81,9 +139,13 @@ const invalidRequest = (message: string): LlmOutcome => ({
 });
 
 /**
- * Primary + fallback gateway for the private `shiyan-llm` Worker.
+ * Shiyan business LLM gateway.
  *
- * Fallback rules (MOB-020): only clearly retryable / provider-unavailable
+ * `SHIYAN_LLM_CONFIG` is the preferred single-secret configuration. Legacy
+ * PRIMARY/FALLBACK variables remain migration-only compatibility and are used
+ * only when the JSON secret is absent.
+ *
+ * Fallback rules (legacy MOB-020): only clearly retryable / provider-unavailable
  * failures fail over. Schema, prompt and business input errors are terminal
  * and are returned as-is so they are never masked by a second provider.
  */
@@ -170,7 +232,6 @@ export class ShiyanLlmGateway {
     }
 
     const attempts = [this.slots.primary, this.slots.fallback];
-    let lastError: import('./llm').LlmFailure | null = null;
     for (let index = 0; index < attempts.length; index += 1) {
       const slot = attempts[index];
       if (!slot) continue;
@@ -191,7 +252,6 @@ export class ShiyanLlmGateway {
       });
 
       if (!call.ok) {
-        lastError = call.error;
         const canFailOver =
           call.error.kind === 'retryable' && attempts.slice(index + 1).some(Boolean);
         if (!canFailOver) return { ok: false, error: call.error };
