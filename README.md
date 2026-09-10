@@ -73,7 +73,7 @@ Organization standard:
 feat/* -> dev -> test -> prod
 ```
 
-This empty-repository bootstrap starts from `main` only to establish the repository. After bootstrap acceptance, `dev`, `test`, and `prod` become the canonical environment branches; `main` is not a parallel environment.
+The empty repository was initialized on `prod` with a minimal README solely to establish the first Git ref. `dev` and `test` were then created from that same bootstrap commit. All implementation changes in this bootstrap are going through `feat/bootstrap-single-worker -> dev`; subsequent promotion follows `dev -> test -> prod`.
 
 CI validates:
 
