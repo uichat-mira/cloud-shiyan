@@ -7,6 +7,8 @@ on:
         description: 'Type upload-preview to upload a non-production Worker version'
         required: true
         type: string
+  push:
+    branches: [ops/shiyan-cutover-preview]
 
 permissions:
   contents: read
@@ -17,7 +19,7 @@ concurrency:
 
 jobs:
   preview:
-    if: ${{ inputs.confirm == 'upload-preview' }}
+    if: ${{ github.event_name == 'push' || inputs.confirm == 'upload-preview' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
@@ -90,3 +92,28 @@ jobs:
           set -euo pipefail
           npx wrangler versions upload --preview-alias shiyan-cutover -c wrangler.preview.json
           echo 'Version uploaded only. Production deployment and route traffic were not changed.'
+
+      - name: Resolve aliased preview URL and smoke public boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          API="https://api.cloudflare.com/client/v4"
+          AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
+          code=$(curl -sS -o /tmp/subdomain.json -w '%{http_code}' -H "$AUTH" \
+            "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/subdomain")
+          test "$code" = "200"
+          test "$(jq -r '.success' /tmp/subdomain.json)" = "true"
+          subdomain=$(jq -r '.result.subdomain // empty' /tmp/subdomain.json)
+          test -n "$subdomain"
+          preview="https://shiyan-cutover-mira-shiyan-api.${subdomain}.workers.dev"
+          echo "Preview URL: ${preview}"
+
+          health_code=$(curl -sS -o /tmp/health.json -w '%{http_code}' "${preview}/health")
+          test "$health_code" = "200"
+          jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null
+          echo 'Preview /health=PASS'
+
+          unauth_code=$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "${preview}/v1/capture-tasks")
+          test "$unauth_code" = "401"
+          jq -e '.ok == false and .error.code == "device_unauthorized"' /tmp/unauth.json >/dev/null
+          echo 'Preview unauthenticated boundary=PASS'
