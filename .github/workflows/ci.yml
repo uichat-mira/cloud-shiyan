@@ -1,0 +1,47 @@
+name: Cloud Shiyan CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev, test, prod]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Generate Cloudflare runtime and binding types
+        run: npx --yes wrangler@4.79.0 types worker-configuration.d.ts -c wrangler.jsonc
+
+      - name: Typecheck
+        run: npx --yes -p typescript@5.9.2 tsc -p tsconfig.json
+
+      - name: STT and Workflow tests
+        run: npx --yes tsx@4.20.5 --test tests/stt.test.ts tests/mob019.workflow.test.ts
+
+      - name: Dry-run single Shiyan Worker
+        run: npx --yes wrangler@4.79.0 deploy --dry-run -c wrangler.jsonc
+
+      - name: Reject obsolete LLM Service Binding topology
+        run: |
+          if grep -R "SHIYAN_LLM\|mira-shiyan-llm" src wrangler.jsonc; then
+            echo "Obsolete two-Worker runtime topology detected."
+            exit 1
+          fi
+          test ! -e wrangler.llm.jsonc
+
+      - name: Verify D1 migrations
+        run: |
+          sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
+          sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
+          sqlite3 /tmp/shiyan.db < migrations/0002_stt_transcript.sql
+          sqlite3 /tmp/shiyan.db '.schema transcripts'
+          sqlite3 /tmp/shiyan.db '.schema transcript_segments'
+          sqlite3 /tmp/shiyan.db 'PRAGMA table_info(audio_assets);'
