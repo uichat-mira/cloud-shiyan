@@ -20,10 +20,10 @@
     "ai": "6.0.270"
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.0.0",
+    "@cloudflare/vitest-plugin": "1.1.5",
     "tsx": "4.20.5",
     "typescript": "5.9.2",
-    "vitest": "^4.1.0",
+    "vitest": "4.1.11",
     "wrangler": "4.79.0"
   }
 }
