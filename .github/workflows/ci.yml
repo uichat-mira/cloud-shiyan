@@ -17,31 +17,39 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install project dependencies
+        run: npm install --no-audit --no-fund
+
       - name: Generate Cloudflare runtime and binding types
-        run: npx --yes wrangler@4.79.0 types worker-configuration.d.ts -c wrangler.jsonc
+        run: npm run types
 
       - name: Typecheck
-        run: npx --yes -p typescript@5.9.2 tsc -p tsconfig.json
+        run: npx tsc -p tsconfig.json
 
-      - name: STT and Workflow tests
-        run: npx --yes tsx@4.20.5 --test tests/stt.test.ts tests/mob019.workflow.test.ts
+      - name: Full inherited Shiyan test suite
+        run: npm test
 
       - name: Dry-run single Shiyan Worker
-        run: npx --yes wrangler@4.79.0 deploy --dry-run -c wrangler.jsonc
+        run: npm run dry-run
 
-      - name: Reject obsolete LLM Service Binding topology
+      - name: Reject obsolete two-Worker topology
         run: |
-          if grep -R "SHIYAN_LLM\|mira-shiyan-llm" src wrangler.jsonc; then
-            echo "Obsolete two-Worker runtime topology detected."
-            exit 1
-          fi
+          test ! -e wrangler.api.jsonc
           test ! -e wrangler.llm.jsonc
+          ! grep -R "mira-shiyan-llm" src wrangler.jsonc
+          ! grep -q '"services"' wrangler.jsonc
 
       - name: Verify D1 migrations
         run: |
           sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
           sqlite3 /tmp/shiyan.db < migrations/0001_capture_foundation.sql
           sqlite3 /tmp/shiyan.db < migrations/0002_stt_transcript.sql
+          sqlite3 /tmp/shiyan.db < migrations/0004_delivery_records.sql
+          sqlite3 /tmp/shiyan.db < migrations/0005_llm_organization.sql
+          sqlite3 /tmp/shiyan.db < migrations/0005_llm_organization.sql
           sqlite3 /tmp/shiyan.db '.schema transcripts'
           sqlite3 /tmp/shiyan.db '.schema transcript_segments'
+          sqlite3 /tmp/shiyan.db '.schema delivery_records'
+          sqlite3 /tmp/shiyan.db '.schema drafts'
+          sqlite3 /tmp/shiyan.db '.schema scenes'
           sqlite3 /tmp/shiyan.db 'PRAGMA table_info(audio_assets);'
