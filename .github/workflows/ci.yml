@@ -3,7 +3,7 @@ name: Cloud Shiyan CI
 on:
   pull_request:
   push:
-    branches: [main, dev, test, prod]
+    branches: [dev, test, prod]
 
 permissions:
   contents: read
