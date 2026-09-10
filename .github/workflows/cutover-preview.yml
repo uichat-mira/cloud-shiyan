@@ -31,6 +31,9 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Use npm 11
+        run: npm install --global npm@11
+
       - name: Validate shared Cloudflare deployment authority
         shell: bash
         run: |
@@ -46,14 +49,14 @@ jobs:
           const fs = require('node:fs');
           const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
           config.preview_urls = true;
-          fs.writeFileSync('/tmp/wrangler.preview.json', JSON.stringify(config, null, 2));
+          fs.writeFileSync('wrangler.preview.json', JSON.stringify(config, null, 2));
           NODE
 
       - name: Require target runtime secrets before any upload
         shell: bash
         run: |
           set -euo pipefail
-          output=$(npx --yes wrangler@${WRANGLER_VERSION} secret list -c /tmp/wrangler.preview.json)
+          output=$(npx --yes wrangler@${WRANGLER_VERSION} secret list -c wrangler.preview.json)
           required=(
             DEVICE_AUTH_PEPPER
             R2_ACCESS_KEY_ID
@@ -79,11 +82,11 @@ jobs:
         run: npm run typecheck && npm test
 
       - name: Dry-run effective preview config
-        run: npx wrangler deploy --dry-run -c /tmp/wrangler.preview.json
+        run: npx wrangler deploy --dry-run -c wrangler.preview.json
 
       - name: Upload version only — do not deploy production traffic
         shell: bash
         run: |
           set -euo pipefail
-          npx wrangler versions upload --preview-alias shiyan-cutover -c /tmp/wrangler.preview.json
+          npx wrangler versions upload --preview-alias shiyan-cutover -c wrangler.preview.json
           echo 'Version uploaded only. Production deployment and route traffic were not changed.'
