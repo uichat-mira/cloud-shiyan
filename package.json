@@ -9,7 +9,7 @@
     "types": "wrangler types worker-configuration.d.ts -c wrangler.jsonc",
     "typecheck": "npm run types && tsc -p tsconfig.json",
     "test": "npm run test:unit && npm run test:contract && npm run test:integration",
-    "test:unit": "tsx --test tests/stt.test.ts tests/mob020.llm.test.ts",
+    "test:unit": "tsx --test tests/stt.test.ts tests/mob020.llm.test.ts tests/llm-config.test.ts",
     "test:contract": "tsx --test tests/mob019.workflow.test.ts tests/mob020.organize.test.ts tests/mob022.destination.test.ts tests/mob022.delivery.test.ts",
     "test:integration": "vitest run --config vitest.config.ts",
     "dry-run": "wrangler deploy --dry-run -c wrangler.jsonc",

@@ -38,51 +38,15 @@ jobs:
           test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo 'Missing CLOUDFLARE_API_TOKEN'; exit 1; }
           test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo 'Missing CLOUDFLARE_ACCOUNT_ID'; exit 1; }
 
-      - name: Build effective preview config from real legacy LLM plain-text settings
+      - name: Build non-production preview config
         shell: bash
         run: |
           set -euo pipefail
-          API="https://api.cloudflare.com/client/v4"
-          AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
-          ACCOUNT="${CLOUDFLARE_ACCOUNT_ID}"
-
-          code=$(curl -sS -o /tmp/legacy-llm-settings.json -w '%{http_code}' \
-            -H "$AUTH" \
-            -H 'Content-Type: application/json' \
-            "${API}/accounts/${ACCOUNT}/workers/scripts/mira-shiyan-llm/settings")
-          test "$code" = "200"
-          test "$(jq -r '.success' /tmp/legacy-llm-settings.json)" = "true"
-
           node <<'NODE'
           const fs = require('node:fs');
           const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
-          const settings = JSON.parse(fs.readFileSync('/tmp/legacy-llm-settings.json', 'utf8'));
-          const bindings = settings.result?.bindings ?? [];
-          const allowed = new Set([
-            'LLM_PRIMARY_PROVIDER',
-            'LLM_PRIMARY_BASE_URL',
-            'LLM_PRIMARY_MODEL',
-            'LLM_FALLBACK_PROVIDER',
-            'LLM_FALLBACK_BASE_URL',
-            'LLM_FALLBACK_MODEL',
-            'LLM_TIMEOUT_MS',
-            'LLM_MAX_TRANSCRIPT_CHARS',
-          ]);
-          config.vars ??= {};
-          const copied = [];
-          for (const binding of bindings) {
-            if (binding?.type !== 'plain_text' || !allowed.has(binding.name)) continue;
-            const value = binding.text ?? binding.value;
-            if (typeof value !== 'string' || value.length === 0) continue;
-            config.vars[binding.name] = value;
-            copied.push(binding.name);
-          }
-          for (const required of ['LLM_PRIMARY_PROVIDER', 'LLM_PRIMARY_BASE_URL', 'LLM_PRIMARY_MODEL']) {
-            if (!copied.includes(required)) throw new Error(`Legacy LLM setting missing: ${required}`);
-          }
           config.preview_urls = true;
           fs.writeFileSync('/tmp/wrangler.preview.json', JSON.stringify(config, null, 2));
-          console.log(`Copied ${copied.length} LLM plain-text setting name(s) without logging values.`);
           NODE
 
       - name: Require target runtime secrets before any upload
@@ -95,7 +59,7 @@ jobs:
             R2_ACCESS_KEY_ID
             R2_SECRET_ACCESS_KEY
             GITHUB_DESTINATION_TOKEN
-            LLM_PRIMARY_API_KEY
+            SHIYAN_LLM_CONFIG
           )
           missing=0
           for name in "${required[@]}"; do
