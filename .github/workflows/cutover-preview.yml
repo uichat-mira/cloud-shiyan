@@ -1,4 +1,4 @@
-name: Cloud Shiyan preview smoke diagnostic
+name: Cloud Shiyan preview settings diagnostic
 
 on:
   push:
@@ -8,23 +8,23 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
+  inspect:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Inspect preview HTTP boundary
+      - name: Read Worker preview routing settings
         shell: bash
         run: |
-          set -u
-          preview='https://shiyan-cutover-mira-shiyan-api.dangjingtao.workers.dev'
-          echo "Preview URL: ${preview}"
-          health_code=$(curl -sS -L -o /tmp/health.txt -w '%{http_code}' "${preview}/health" || true)
-          echo "health_status=${health_code}"
-          echo 'health_body:'
-          head -c 1000 /tmp/health.txt 2>/dev/null || true
-          echo
-          unauth_code=$(curl -sS -L -o /tmp/unauth.txt -w '%{http_code}' "${preview}/v1/capture-tasks" || true)
-          echo "unauth_status=${unauth_code}"
-          echo 'unauth_body:'
-          head -c 1000 /tmp/unauth.txt 2>/dev/null || true
-          echo
+          set -euo pipefail
+          API='https://api.cloudflare.com/client/v4'
+          AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
+          code=$(curl -sS -o /tmp/subdomain.json -w '%{http_code}' -H "$AUTH" \
+            "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/mira-shiyan-api/subdomain")
+          echo "http=${code}"
+          test "$code" = '200'
+          test "$(jq -r '.success' /tmp/subdomain.json)" = 'true'
+          echo "workers_dev_enabled=$(jq -r '.result.enabled' /tmp/subdomain.json)"
+          echo "previews_enabled=$(jq -r '.result.previews_enabled' /tmp/subdomain.json)"
