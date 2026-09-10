@@ -3,10 +3,13 @@
   "name": "mira-shiyan",
   "main": "src/api/index.ts",
   "compatibility_date": "2026-08-29",
+  "keep_vars": true,
   "observability": { "enabled": true },
   "vars": {
     "R2_BUCKET_NAME": "mira-shiyan-audio",
-    "UPLOAD_TTL_SECONDS": "900"
+    "UPLOAD_TTL_SECONDS": "900",
+    "LLM_TIMEOUT_MS": "120000",
+    "LLM_MAX_TRANSCRIPT_CHARS": "200000"
   },
   "ai": {
     "binding": "AI"

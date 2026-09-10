@@ -1,26 +1,30 @@
-export interface OrganizeRequest {
-  taskId: string;
-  sceneId: string;
-  transcriptId: string;
-}
+import type {
+  AdjustRequest,
+  LlmOutcome,
+  OrganizeRequest,
+  ShiyanLlmBinding,
+} from '../shared/llm';
+import { ShiyanLlmGateway, resolveLlmSlots, type LlmEnvLike } from '../shared/llmGateway';
 
-export interface OrganizeResult {
-  markdown: string;
-  structured: Record<string, unknown>;
-  provider: string;
-  latencyMs: number;
-}
+export type { AdjustRequest, LlmOutcome, OrganizeRequest } from '../shared/llm';
 
 /**
- * Logical LLM service boundary for Cloud Shiyan.
+ * In-process LLM service boundary for Cloud Shiyan.
  *
- * The old deployment exposed this contract through a private Worker and Service
- * Binding. Cloud Shiyan keeps the module boundary but deliberately does not
- * create a second deployment unit until there is a real isolation/reuse need.
- *
- * Provider selection, secrets, fallback and structured validation are not
- * implemented in the source runtime yet, so bootstrap must not fake them.
+ * Provider configuration and keys remain runtime bindings/secrets owned by
+ * this module. The business layer receives only normalized LLM outcomes.
+ * Keeping this contract independent of D1/CaptureTask state preserves a clean
+ * extraction point if a real isolation or reuse requirement later justifies a
+ * separate deployment unit again.
  */
-export async function generateStructured(_input: OrganizeRequest): Promise<OrganizeResult> {
-  throw new Error('provider_not_configured');
+export function createShiyanLlmService(env: LlmEnvLike): ShiyanLlmBinding {
+  const gateway = new ShiyanLlmGateway(resolveLlmSlots(env));
+  return {
+    generateStructured(input: OrganizeRequest): Promise<LlmOutcome> {
+      return gateway.generateStructured(input);
+    },
+    adjustDraft(input: AdjustRequest): Promise<LlmOutcome> {
+      return gateway.adjustDraft(input);
+    },
+  };
 }
