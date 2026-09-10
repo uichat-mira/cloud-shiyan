@@ -1,4 +1,4 @@
-name: Cloud Shiyan preview settings diagnostic
+name: Cloud Shiyan preview enable and smoke
 
 on:
   push:
@@ -8,23 +8,44 @@ permissions:
   contents: read
 
 jobs:
-  inspect:
+  preview:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
     steps:
-      - name: Read Worker preview routing settings
+      - name: Enable preview URLs without enabling workers.dev
         shell: bash
         run: |
           set -euo pipefail
           API='https://api.cloudflare.com/client/v4'
           AUTH="Authorization: Bearer ${CLOUDFLARE_API_TOKEN}"
-          code=$(curl -sS -o /tmp/subdomain.json -w '%{http_code}' -H "$AUTH" \
-            "${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/mira-shiyan-api/subdomain")
-          echo "http=${code}"
+          endpoint="${API}/accounts/${CLOUDFLARE_ACCOUNT_ID}/workers/scripts/mira-shiyan-api/subdomain"
+          code=$(curl -sS -o /tmp/result.json -w '%{http_code}' -X POST \
+            -H "$AUTH" -H 'Content-Type: application/json' \
+            --data '{"enabled":false,"previews_enabled":true}' "$endpoint")
+          echo "update_http=${code}"
           test "$code" = '200'
-          test "$(jq -r '.success' /tmp/subdomain.json)" = 'true'
-          echo "workers_dev_enabled=$(jq -r '.result.enabled' /tmp/subdomain.json)"
-          echo "previews_enabled=$(jq -r '.result.previews_enabled' /tmp/subdomain.json)"
+          test "$(jq -r '.success' /tmp/result.json)" = 'true'
+          test "$(jq -r '.result.enabled' /tmp/result.json)" = 'false'
+          test "$(jq -r '.result.previews_enabled' /tmp/result.json)" = 'true'
+          echo 'workers_dev_enabled=false'
+          echo 'previews_enabled=true'
+
+      - name: Smoke aliased preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview='https://shiyan-cutover-mira-shiyan-api.dangjingtao.workers.dev'
+          health_code=$(curl --retry 3 --retry-delay 1 -sS -o /tmp/health.json -w '%{http_code}' "${preview}/health")
+          echo "health_status=${health_code}"
+          test "$health_code" = '200'
+          jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null
+          echo 'Preview /health=PASS'
+
+          unauth_code=$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "${preview}/v1/capture-tasks")
+          echo "unauth_status=${unauth_code}"
+          test "$unauth_code" = '401'
+          jq -e '.ok == false and .error.code == "device_unauthorized"' /tmp/unauth.json >/dev/null
+          echo 'Preview unauthenticated boundary=PASS'
