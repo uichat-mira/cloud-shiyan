@@ -1,0 +1,38 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mira-shiyan",
+  "main": "src/api/index.ts",
+  "compatibility_date": "2026-08-29",
+  "observability": { "enabled": true },
+  "vars": {
+    "R2_BUCKET_NAME": "mira-shiyan-audio",
+    "UPLOAD_TTL_SECONDS": "900"
+  },
+  "ai": {
+    "binding": "AI"
+  },
+  "triggers": {
+    "crons": ["0 * * * *"]
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "mira-shiyan",
+      "database_id": "REPLACE_WITH_D1_DATABASE_ID",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "AUDIO",
+      "bucket_name": "mira-shiyan-audio"
+    }
+  ],
+  "workflows": [
+    {
+      "binding": "CAPTURE_WORKFLOW",
+      "name": "mira-shiyan-capture",
+      "class_name": "ShiyanCaptureWorkflow"
+    }
+  ]
+}
