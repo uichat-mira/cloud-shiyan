@@ -80,6 +80,7 @@ interface Env extends LlmEnvLike {
   R2_BUCKET_NAME: string;
   UPLOAD_TTL_SECONDS: string;
   DEVICE_AUTH_PEPPER: string;
+  CUTOVER_R2_PROBE_TOKEN?: string;
   GITHUB_DESTINATION_TOKEN: string;
   GITHUB_DESTINATION_OWNER?: string;
   GITHUB_DESTINATION_REPOSITORY?: string;
@@ -636,6 +637,48 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({ ok: true, data: { service: 'mira-shiyan' }, requestId });
+    }
+
+    if (url.pathname === '/__cutover/r2-probe') {
+      const expected = env.CUTOVER_R2_PROBE_TOKEN?.trim();
+      const supplied = request.headers.get('x-cutover-r2-probe-token')?.trim();
+      if (!expected || !supplied || supplied !== expected) {
+        return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
+      }
+
+      if (request.method === 'POST') {
+        const key = `cutover-probe/${crypto.randomUUID()}.bin`;
+        const contentType = 'application/octet-stream';
+        const url = await createPresignedR2PutUrl({
+          accountId: env.R2_ACCOUNT_ID,
+          bucket: env.R2_BUCKET_NAME,
+          objectKey: key,
+          accessKeyId: env.R2_ACCESS_KEY_ID,
+          secretAccessKey: env.R2_SECRET_ACCESS_KEY,
+          contentType,
+          expiresInSeconds: 300,
+        });
+        return json({
+          ok: true,
+          data: { key, url, headers: { 'content-type': contentType } },
+          requestId,
+        });
+      }
+
+      if (request.method === 'DELETE') {
+        const body = await safeJson(request);
+        const key = typeof body?.key === 'string' ? body.key.trim() : '';
+        if (!key.startsWith('cutover-probe/')) {
+          return errorResponse(requestId, 400, 'invalid_probe', 'Invalid R2 probe key');
+        }
+        const object = await env.AUDIO.head(key);
+        if (object) await env.AUDIO.delete(key);
+        return json({
+          ok: true,
+          data: { existed: Boolean(object), size: object?.size ?? null },
+          requestId,
+        });
+      }
     }
 
     const device = await authenticateDevice(request, env);
