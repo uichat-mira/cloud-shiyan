@@ -52,6 +52,7 @@ jobs:
           config.vars = {
             ...(config.vars ?? {}),
             R2_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+            SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE: '1',
           };
           fs.writeFileSync('wrangler.preview.json', JSON.stringify(config, null, 2));
           NODE
