@@ -40,6 +40,27 @@ jobs:
           npx --yes wrangler@${WRANGLER_VERSION} versions view "${PRODUCTION_VERSION}" --name mira-shiyan-api --json > /tmp/production.json
           npx --yes wrangler@${WRANGLER_VERSION} versions view "${PREVIEW_VERSION}" --name mira-shiyan-api --json > /tmp/preview.json
 
+      - name: Inspect device registry counts
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@${WRANGLER_VERSION} d1 execute mira-shiyan --remote -c wrangler.jsonc \
+            --command "SELECT COUNT(*) AS total, SUM(CASE WHEN revoked_at IS NULL THEN 1 ELSE 0 END) AS active, SUM(CASE WHEN revoked_at IS NOT NULL THEN 1 ELSE 0 END) AS revoked FROM devices;" \
+            --json > /tmp/device-counts.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const payload = JSON.parse(fs.readFileSync('/tmp/device-counts.json', 'utf8'));
+          const rows = Array.isArray(payload)
+            ? payload.flatMap((entry) => entry?.results ?? [])
+            : payload?.results ?? [];
+          const row = rows[0] ?? {};
+          console.log(JSON.stringify({
+            total: Number(row.total ?? 0),
+            active: Number(row.active ?? 0),
+            revoked: Number(row.revoked ?? 0),
+          }));
+          NODE
+
       - name: Compare binding identities without exposing values
         shell: bash
         run: |
