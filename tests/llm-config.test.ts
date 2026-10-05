@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createShiyanLlmService } from '../src/llm';
 import { resolveLlmSlots } from '../src/shared/llmGateway';
 
 test('SHIYAN_LLM_CONFIG resolves one project-owned provider slot', () => {
@@ -81,5 +82,14 @@ test('incomplete SHIYAN_LLM_CONFIG fails closed with a field-level diagnostic', 
         }),
       }),
     /apiKey must be a non-empty string/u,
+  );
+});
+
+
+test('LLM service construction is lazy so unrelated routes do not parse provider config', () => {
+  assert.doesNotThrow(() =>
+    createShiyanLlmService({
+      SHIYAN_LLM_CONFIG: '{malformed-at-runtime',
+    }),
   );
 });
