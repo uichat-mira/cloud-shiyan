@@ -80,6 +80,7 @@ interface Env extends LlmEnvLike {
   R2_BUCKET_NAME: string;
   UPLOAD_TTL_SECONDS: string;
   DEVICE_AUTH_PEPPER: string;
+  CUTOVER_PROBE_TOKEN?: string;
   GITHUB_DESTINATION_TOKEN: string;
   GITHUB_DESTINATION_OWNER?: string;
   GITHUB_DESTINATION_REPOSITORY?: string;
@@ -650,6 +651,48 @@ export default {
         },
         requestId,
       });
+    }
+
+    // Temporary branch-only cutover probe. It is enabled only on an
+    // explicitly uploaded preview version with a runtime-only random token.
+    if (
+      (request.method === 'POST' || request.method === 'DELETE') &&
+      url.pathname === '/__cutover/probe-device'
+    ) {
+      const expectedToken = env.CUTOVER_PROBE_TOKEN?.trim();
+      const suppliedToken = request.headers.get('x-cutover-probe-token')?.trim();
+      if (!expectedToken || !suppliedToken || suppliedToken !== expectedToken) {
+        return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
+      }
+
+      const body = await safeJson(request);
+      if (request.method === 'POST') {
+        const credential =
+          typeof body?.credential === 'string' ? body.credential.trim() : '';
+        if (!credential.startsWith('cutover-probe-') || credential.length > 128) {
+          return errorResponse(requestId, 400, 'invalid_probe', 'Invalid cutover probe');
+        }
+        const deviceId = `cutover-probe-${crypto.randomUUID()}`;
+        const hash = await sha256Hex(`${env.DEVICE_AUTH_PEPPER}:${credential}`);
+        const now = new Date().toISOString();
+        await env.DB.prepare(
+          `INSERT INTO devices
+             (id, credential_hash, user_id, display_name, created_at, last_seen_at, revoked_at)
+           VALUES (?, ?, NULL, 'Cutover auth probe', ?, ?, NULL)`,
+        )
+          .bind(deviceId, hash, now, now)
+          .run();
+        return json({ ok: true, data: { deviceId }, requestId });
+      }
+
+      const deviceId = typeof body?.deviceId === 'string' ? body.deviceId.trim() : '';
+      if (!deviceId.startsWith('cutover-probe-')) {
+        return errorResponse(requestId, 400, 'invalid_probe', 'Invalid cutover probe');
+      }
+      await env.DB.prepare('DELETE FROM devices WHERE id = ? AND display_name = ?')
+        .bind(deviceId, 'Cutover auth probe')
+        .run();
+      return json({ ok: true, data: { deleted: true }, requestId });
     }
 
     const device = await authenticateDevice(request, env);
