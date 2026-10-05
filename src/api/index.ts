@@ -670,12 +670,50 @@ export default {
           instruction: '保持事实不变，把表达压缩得更简洁。',
         });
       } catch (error) {
-        return errorResponse(
-          requestId,
+        const rawConfig = env.SHIYAN_LLM_CONFIG;
+        let jsonValid = false;
+        let jsonObject = false;
+        if (typeof rawConfig === 'string') {
+          try {
+            const parsed = JSON.parse(rawConfig);
+            jsonValid = true;
+            jsonObject =
+              typeof parsed === 'object' &&
+              parsed !== null &&
+              !Array.isArray(parsed);
+          } catch {
+            jsonValid = false;
+          }
+        }
+        return json(
+          {
+            ok: false,
+            error: {
+              code: 'adjust_probe_exception',
+              message:
+                error instanceof Error ? error.message : 'unknown adjust probe exception',
+              retryable: false,
+            },
+            data: {
+              configPresent: typeof rawConfig === 'string',
+              configLength: typeof rawConfig === 'string' ? rawConfig.length : 0,
+              startsWithBrace:
+                typeof rawConfig === 'string' && rawConfig.trim().startsWith('{'),
+              startsWithQuote:
+                typeof rawConfig === 'string' &&
+                (rawConfig.trim().startsWith('"') || rawConfig.trim().startsWith("'")),
+              jsonValid,
+              jsonObject,
+              legacyPrimary: {
+                provider: Boolean(env.LLM_PRIMARY_PROVIDER?.trim()),
+                baseUrl: Boolean(env.LLM_PRIMARY_BASE_URL?.trim()),
+                model: Boolean(env.LLM_PRIMARY_MODEL?.trim()),
+                apiKey: Boolean(env.LLM_PRIMARY_API_KEY?.trim()),
+              },
+            },
+            requestId,
+          },
           500,
-          'adjust_probe_exception',
-          error instanceof Error ? error.message : 'unknown adjust probe exception',
-          false,
         );
       }
 
