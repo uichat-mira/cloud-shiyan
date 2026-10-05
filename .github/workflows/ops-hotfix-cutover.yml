@@ -1,0 +1,90 @@
+name: Cloud Shiyan hotfix exact-version cutover
+
+on:
+  push:
+    branches: [prod]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-shiyan-hotfix-cutover
+  cancel-in-progress: false
+
+jobs:
+  cutover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: '4.79.0'
+      WORKER_NAME: mira-shiyan-api
+      TARGET_VERSION: fc089452-e502-41a7-85e6-71880a101812
+      ROLLBACK_VERSION: 4b039f12-0bdc-433a-9553-00ad72a28426
+      CUTOVER_MARKER: 'ops: cut over Shiyan hotfix fc089452'
+    steps:
+      - name: Execute guarded hotfix cutover
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          message="$(jq -r '.head_commit.message // ""' "$GITHUB_EVENT_PATH" | head -n1)"
+          if [ "$message" != "$CUTOVER_MARKER" ]; then
+            echo "Not the authorized one-shot hotfix marker; no production action."
+            exit 0
+          fi
+
+          test -n "${CLOUDFLARE_API_TOKEN:-}"
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
+
+          echo "Pre-cutover production status:"
+          npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/before.json
+          cat /tmp/before.json
+          grep -Fq "${ROLLBACK_VERSION}" /tmp/before.json
+
+          deployed=0
+          rollback() {
+            if [ "$deployed" = "1" ]; then
+              echo "::error::Hotfix verification failed; restoring ${ROLLBACK_VERSION} at 100%"
+              npx --yes wrangler@${WRANGLER_VERSION} versions deploy "${ROLLBACK_VERSION}@100%" \
+                --name "${WORKER_NAME}" \
+                --message "Automatic rollback after Shiyan hotfix verification failure" \
+                -y
+              npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/rollback.json
+              cat /tmp/rollback.json
+              grep -Fq "${ROLLBACK_VERSION}" /tmp/rollback.json
+            fi
+          }
+          trap rollback ERR
+
+          echo "Promoting exact hotfix version ${TARGET_VERSION} to 100%."
+          npx --yes wrangler@${WRANGLER_VERSION} versions deploy "${TARGET_VERSION}@100%" \
+            --name "${WORKER_NAME}" \
+            --message "Shiyan AI output budget hotfix" \
+            -y
+          deployed=1
+
+          echo "Post-cutover production status:"
+          npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/after.json
+          cat /tmp/after.json
+          grep -Fq "${TARGET_VERSION}" /tmp/after.json
+
+          ok=0
+          for attempt in 1 2 3 4 5 6; do
+            health_code="$(curl -sS --max-time 15 -o /tmp/health.json -w '%{http_code}' https://shiyan-api.tomz.io/health || true)"
+            unauth_code="$(curl -sS --max-time 15 -o /tmp/unauth.json -w '%{http_code}' https://shiyan-api.tomz.io/v1/scenes || true)"
+            echo "attempt=${attempt} health=${health_code} unauth=${unauth_code}"
+            if [ "${health_code}" = "200" ] \
+              && jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null 2>&1 \
+              && [ "${unauth_code}" = "401" ] \
+              && jq -e '.ok == false and .error.code == "device_unauthorized"' /tmp/unauth.json >/dev/null 2>&1; then
+              ok=1
+              break
+            fi
+            sleep 5
+          done
+
+          test "$ok" = "1"
+          trap - ERR
+          echo "HOTFIX_CUTOVER_T5=PASS"
