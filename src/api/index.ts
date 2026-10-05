@@ -673,6 +673,7 @@ export default {
         const rawConfig = env.SHIYAN_LLM_CONFIG;
         let jsonValid = false;
         let jsonObject = false;
+        let parseError = '';
         if (typeof rawConfig === 'string') {
           try {
             const parsed = JSON.parse(rawConfig);
@@ -681,8 +682,10 @@ export default {
               typeof parsed === 'object' &&
               parsed !== null &&
               !Array.isArray(parsed);
-          } catch {
+          } catch (parseFailure) {
             jsonValid = false;
+            parseError =
+              parseFailure instanceof Error ? parseFailure.message : 'unknown parse error';
           }
         }
         return Response.json(
@@ -704,6 +707,23 @@ export default {
                 (rawConfig.trim().startsWith('"') || rawConfig.trim().startsWith("'")),
               jsonValid,
               jsonObject,
+              parseError,
+              endsWithBrace:
+                typeof rawConfig === 'string' && rawConfig.trim().endsWith('}'),
+              singleQuoteCount:
+                typeof rawConfig === 'string' ? (rawConfig.match(/'/g) ?? []).length : 0,
+              doubleQuoteCount:
+                typeof rawConfig === 'string' ? (rawConfig.match(/"/g) ?? []).length : 0,
+              newlineCount:
+                typeof rawConfig === 'string' ? (rawConfig.match(/\n/g) ?? []).length : 0,
+              hasProviderKey:
+                typeof rawConfig === 'string' && rawConfig.includes('provider'),
+              hasBaseUrlKey:
+                typeof rawConfig === 'string' && rawConfig.includes('baseUrl'),
+              hasModelKey:
+                typeof rawConfig === 'string' && rawConfig.includes('model'),
+              hasApiKeyKey:
+                typeof rawConfig === 'string' && rawConfig.includes('apiKey'),
               legacyPrimary: {
                 provider: Boolean(env.LLM_PRIMARY_PROVIDER?.trim()),
                 baseUrl: Boolean(env.LLM_PRIMARY_BASE_URL?.trim()),
