@@ -1,0 +1,100 @@
+name: Cloud Shiyan R2 presign probe
+
+on:
+  push:
+    branches: [fix/shiyan-cutover-auth-preview]
+    paths:
+      - '.github/workflows/cutover-r2-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: '4.79.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build probe preview config
+        shell: bash
+        run: |
+          set -euo pipefail
+          probe_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$probe_token"
+          echo "CUTOVER_R2_PROBE_TOKEN=$probe_token" >> "$GITHUB_ENV"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
+          config.preview_urls = true;
+          config.vars = {
+            ...(config.vars ?? {}),
+            CUTOVER_R2_PROBE_TOKEN: process.env.CUTOVER_R2_PROBE_TOKEN,
+          };
+          fs.writeFileSync('wrangler.r2-probe.json', JSON.stringify(config, null, 2));
+          NODE
+
+      - name: Upload immutable probe version
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+          npx --yes wrangler@${WRANGLER_VERSION} versions upload -c wrangler.r2-probe.json | tee /tmp/upload.log
+          preview_url="$(sed -n 's/.*Version Preview URL: //p' /tmp/upload.log | tail -n1)"
+          test -n "$preview_url"
+          echo "CUTOVER_R2_PROBE_URL=$preview_url" >> "$GITHUB_ENV"
+          echo "Immutable preview URL: $preview_url"
+          echo 'No production deployment performed.'
+
+      - name: Generate a real presigned PUT and upload bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview="$CUTOVER_R2_PROBE_URL"
+          code=$(curl -sS -o /tmp/grant.json -w '%{http_code}' \
+            -X POST \
+            -H "X-Cutover-R2-Probe-Token: $CUTOVER_R2_PROBE_TOKEN" \
+            "$preview/__cutover/r2-probe")
+          echo "grant_status=$code"
+          test "$code" = '200'
+
+          upload_url="$(jq -r '.data.url // empty' /tmp/grant.json)"
+          object_key="$(jq -r '.data.key // empty' /tmp/grant.json)"
+          content_type="$(jq -r '.data.headers["content-type"] // empty' /tmp/grant.json)"
+          test -n "$upload_url"
+          test -n "$object_key"
+          test -n "$content_type"
+
+          printf 'mira-shiyan-r2-probe' > /tmp/probe.bin
+          upload_code=$(curl -sS -o /tmp/r2-response.txt -w '%{http_code}' \
+            -X PUT \
+            -H "Content-Type: $content_type" \
+            --data-binary @/tmp/probe.bin \
+            "$upload_url")
+          echo "r2_put_status=$upload_code"
+          if [ "$upload_code" -lt 200 ] || [ "$upload_code" -ge 300 ]; then
+            echo 'R2 response:'
+            cat /tmp/r2-response.txt
+            echo
+            exit 1
+          fi
+
+          jq -n --arg key "$object_key" '{key:$key}' > /tmp/cleanup.json
+          verify_code=$(curl -sS -o /tmp/verify.json -w '%{http_code}' \
+            -X DELETE \
+            -H 'Content-Type: application/json' \
+            -H "X-Cutover-R2-Probe-Token: $CUTOVER_R2_PROBE_TOKEN" \
+            --data-binary @/tmp/cleanup.json \
+            "$preview/__cutover/r2-probe")
+          echo "verify_status=$verify_code"
+          test "$verify_code" = '200'
+          jq -e '.ok == true and .data.existed == true and .data.size == 20' /tmp/verify.json >/dev/null
+          echo 'R2_PRESIGNED_PUT=PASS'
