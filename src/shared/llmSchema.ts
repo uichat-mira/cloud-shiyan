@@ -134,9 +134,12 @@ export const parseStructuredContent = (
   try {
     return { ok: true, value: JSON.parse(text) as unknown };
   } catch {
+    const trimmed = content.trim();
     return {
       ok: false,
-      message: 'structured output is not valid JSON',
+      message:
+        'structured output is not valid JSON' +
+        ` [length=${trimmed.length}, startsBrace=${trimmed.startsWith('{')}, endsBrace=${trimmed.endsWith('}')}, firstBrace=${trimmed.indexOf('{')}, lastBrace=${trimmed.lastIndexOf('}')}]`,
     };
   }
 };
