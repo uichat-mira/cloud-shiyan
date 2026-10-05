@@ -39,7 +39,7 @@ export interface LlmEnvLike {
    * Cutover-only compatibility for one known malformed secret shape.
    * Strict parsing remains the default; this flag must be set explicitly.
    */
-  SHIYAN_LLM_CONFIG_REPAIR_SINGLE_QUOTE?: string;
+  SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE?: string;
 
   // Legacy compatibility. Used only when SHIYAN_LLM_CONFIG is absent.
   LLM_PRIMARY_PROVIDER?: string;
@@ -105,13 +105,13 @@ const repairSingleMissingDoubleQuote = (raw: string): unknown | null => {
 
 const resolveShiyanConfig = (
   raw: string,
-  allowSingleQuoteRepair = false,
+  allowSingleMissingDoubleQuoteRepair = false,
 ): LlmProviderSlot => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    if (!allowSingleQuoteRepair) {
+    if (!allowSingleMissingDoubleQuoteRepair) {
       throw new Error('SHIYAN_LLM_CONFIG is invalid JSON');
     }
     parsed = repairSingleMissingDoubleQuote(raw);
@@ -166,7 +166,7 @@ export const resolveLlmSlots = (env: LlmEnvLike): LlmGatewaySlots => {
     return {
       primary: resolveShiyanConfig(
         env.SHIYAN_LLM_CONFIG,
-        env.SHIYAN_LLM_CONFIG_REPAIR_SINGLE_QUOTE === '1',
+        env.SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE === '1',
       ),
       fallback: null,
       ...shared,
