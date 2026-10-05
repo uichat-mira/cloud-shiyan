@@ -25,6 +25,8 @@ export interface LlmCallInput {
   userPrompt: string;
 }
 
+export const SHIYAN_MAX_OUTPUT_TOKENS = 8192;
+
 export type LlmCallResult =
   | {
       ok: true;
@@ -151,15 +153,26 @@ export class OpenAiCompatibleChatProvider {
         system: input.systemPrompt,
         prompt: input.userPrompt,
         temperature: 0.2,
-        // Organize/adjust responses are small structured JSON. Bound output so
-        // a reasoning-heavy or misrouted provider cannot burn thousands of
-        // completion tokens before the request timeout.
-        maxOutputTokens: 1200,
+        // Meeting organization/adjustment returns the complete structured draft,
+        // not a short answer. Keep a generous bound so ordinary meeting notes are
+        // not truncated into invalid JSON while still retaining a hard safety cap.
+        maxOutputTokens: SHIYAN_MAX_OUTPUT_TOKENS,
         // ShiyanLlmGateway owns failover. Disable SDK retries so one provider
         // attempt cannot silently multiply requests before fallback begins.
         maxRetries: 0,
         abortSignal: controller.signal,
       });
+
+      if (result.finishReason === 'length') {
+        return {
+          ok: false,
+          error: {
+            kind: 'retryable',
+            code: 'output_truncated',
+            message: `${this.config.provider} output reached the ${SHIYAN_MAX_OUTPUT_TOKENS}-token limit`,
+          },
+        };
+      }
 
       const content = result.text;
       if (!content.trim()) {
