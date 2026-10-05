@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   preview:
-    if: ${{ inputs.confirm == 'upload-preview' }}
+    if: ${{ github.event_name == 'push' || inputs.confirm == 'upload-preview' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
