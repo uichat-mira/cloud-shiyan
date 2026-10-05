@@ -685,7 +685,7 @@ export default {
             jsonValid = false;
           }
         }
-        return json(
+        return Response.json(
           {
             ok: false,
             error: {
@@ -694,7 +694,7 @@ export default {
                 error instanceof Error ? error.message : 'unknown adjust probe exception',
               retryable: false,
             },
-            data: {
+            diagnostics: {
               configPresent: typeof rawConfig === 'string',
               configLength: typeof rawConfig === 'string' ? rawConfig.length : 0,
               startsWithBrace:
@@ -713,7 +713,10 @@ export default {
             },
             requestId,
           },
-          500,
+          {
+            status: 500,
+            headers: { 'cache-control': 'no-store' },
+          },
         );
       }
 
