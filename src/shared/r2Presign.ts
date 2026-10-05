@@ -64,6 +64,7 @@ export interface R2PresignInput {
 export async function createPresignedR2PutUrl(
   input: R2PresignInput,
 ): Promise<string> {
+  if (!input.accountId.trim()) throw new Error('R2 account id is required');
   if (input.expiresInSeconds < 1 || input.expiresInSeconds > 604800) {
     throw new Error('R2 presign expiry must be between 1 second and 7 days');
   }
