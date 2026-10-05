@@ -1,6 +1,10 @@
 name: Cloud Shiyan cutover preview
 
 on:
+  push:
+    branches: [fix/shiyan-cutover-auth-preview]
+    paths:
+      - '.github/workflows/cutover-preview.yml'
   workflow_dispatch:
     inputs:
       confirm:
