@@ -71,16 +71,20 @@ jobs:
           npx wrangler deploy --dry-run -c wrangler.pepper-ab.json
           npx wrangler versions upload --preview-alias shiyan-pepper-ab -c wrangler.pepper-ab.json | tee /tmp/upload.log
           version_id="$(sed -n 's/.*Worker Version ID: //p' /tmp/upload.log | tail -n1)"
+          preview_url="$(sed -n 's/.*Version Preview URL: //p' /tmp/upload.log | tail -n1)"
           test -n "$version_id"
+          test -n "$preview_url"
           echo "CUTOVER_PROBE_VERSION=$version_id" >> "$GITHUB_ENV"
+          echo "CUTOVER_PROBE_URL=$preview_url" >> "$GITHUB_ENV"
           echo "Worker Version ID: $version_id"
+          echo "Immutable preview URL: $preview_url"
           echo "No production deployment performed."
 
       - name: Provision one ephemeral probe device with candidate pepper
         shell: bash
         run: |
           set -euo pipefail
-          preview='https://shiyan-pepper-ab-mira-shiyan-api.dangjingtao.workers.dev'
+          preview="$CUTOVER_PROBE_URL"
           sleep 3
           jq -n --arg credential "$CUTOVER_PROBE_CREDENTIAL"             '{credential:$credential}' > /tmp/provision-body.json
           code=$(curl -sS -o /tmp/provision.json -w '%{http_code}'             -H 'Content-Type: application/json'             -H "X-Cutover-Probe-Token: $CUTOVER_PROBE_TOKEN"             --data-binary @/tmp/provision-body.json             "$preview/__cutover/probe-device")
@@ -94,7 +98,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          preview='https://shiyan-pepper-ab-mira-shiyan-api.dangjingtao.workers.dev'
+          preview="$CUTOVER_PROBE_URL"
           production='https://shiyan-api.tomz.io'
 
           candidate_code=$(curl -sS -o /tmp/candidate.json -w '%{http_code}'             -H "Authorization: Bearer $CUTOVER_PROBE_CREDENTIAL"             "$preview/v1/scenes")
@@ -126,7 +130,7 @@ jobs:
             echo 'No probe device to clean up.'
             exit 0
           fi
-          preview='https://shiyan-pepper-ab-mira-shiyan-api.dangjingtao.workers.dev'
+          preview="$CUTOVER_PROBE_URL"
           jq -n --arg deviceId "$CUTOVER_PROBE_DEVICE_ID"             '{deviceId:$deviceId}' > /tmp/cleanup-body.json
           code=$(curl -sS -o /tmp/cleanup.json -w '%{http_code}'             -X DELETE             -H 'Content-Type: application/json'             -H "X-Cutover-Probe-Token: $CUTOVER_PROBE_TOKEN"             --data-binary @/tmp/cleanup-body.json             "$preview/__cutover/probe-device")
           echo "cleanup_status=$code"
