@@ -679,13 +679,10 @@ export default {
     ) {
       const expectedToken = env.CUTOVER_PROBE_TOKEN?.trim();
       const suppliedToken = request.headers.get('x-cutover-probe-token')?.trim();
-      const expiresAt = Date.parse(env.CUTOVER_PROBE_EXPIRES_AT ?? '');
       if (
         !expectedToken ||
         !suppliedToken ||
-        suppliedToken !== expectedToken ||
-        !Number.isFinite(expiresAt) ||
-        Date.now() >= expiresAt
+        suppliedToken !== expectedToken
       ) {
         return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
       }
