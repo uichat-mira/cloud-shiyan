@@ -10,6 +10,7 @@ import {
 import { handleMob020Request, runMob020Organize } from './mob020';
 import { handleMob022Request } from './mob022';
 import { createShiyanLlmService } from '../llm/index';
+import { BUILT_IN_SCENES } from '../shared/scenes';
 import { createPresignedR2PutUrl } from '../shared/r2Presign';
 import type { ShiyanLlmBinding } from '../shared/llm';
 import type { LlmEnvLike } from '../shared/llmGateway';
@@ -80,6 +81,7 @@ interface Env extends LlmEnvLike {
   R2_BUCKET_NAME: string;
   UPLOAD_TTL_SECONDS: string;
   DEVICE_AUTH_PEPPER: string;
+  CUTOVER_ADJUST_PROBE_TOKEN?: string;
   GITHUB_DESTINATION_TOKEN: string;
   GITHUB_DESTINATION_OWNER?: string;
   GITHUB_DESTINATION_REPOSITORY?: string;
@@ -636,6 +638,67 @@ export default {
 
     if (request.method === 'GET' && url.pathname === '/health') {
       return json({ ok: true, data: { service: 'mira-shiyan' }, requestId });
+    }
+
+    if (request.method === 'POST' && url.pathname === '/__cutover/adjust-probe') {
+      const expected = env.CUTOVER_ADJUST_PROBE_TOKEN?.trim();
+      const supplied = request.headers.get('x-cutover-adjust-probe-token')?.trim();
+      if (!expected || !supplied || supplied !== expected) {
+        return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
+      }
+
+      const scene = BUILT_IN_SCENES.find((item) => item.id === 'quick-note')!;
+      let outcome;
+      try {
+        outcome = await createShiyanLlmService(env).adjustDraft({
+          taskId: 'cutover-adjust-probe',
+          correlationId: requestId,
+          scene,
+          title: '拾言调整探针',
+          transcriptText:
+            '我们需要把现有摘要压缩一些，保留已经确认的要求，不新增原文没有的信息。',
+          currentDraft: {
+            markdown: '# 拾言调整探针\n\n## 摘要\n当前摘要较长，需要压缩。\n',
+            structured: {
+              summary: '当前摘要较长，需要压缩。',
+              sections: scene.sections.map((section) => ({
+                id: section.id,
+                items: section.id === 'requirements' ? ['保留已经确认的要求'] : [],
+              })),
+            },
+          },
+          instruction: '保持事实不变，把表达压缩得更简洁。',
+        });
+      } catch (error) {
+        return errorResponse(
+          requestId,
+          500,
+          'adjust_probe_exception',
+          error instanceof Error ? error.message : 'unknown adjust probe exception',
+          false,
+        );
+      }
+
+      if (!outcome.ok) {
+        return errorResponse(
+          requestId,
+          outcome.error.kind === 'retryable' ? 502 : 409,
+          outcome.error.code,
+          outcome.error.message,
+          outcome.error.kind === 'retryable',
+        );
+      }
+
+      return json({
+        ok: true,
+        data: {
+          provider: outcome.value.provider,
+          model: outcome.value.model,
+          summaryLength: outcome.value.structured.summary.length,
+          sectionIds: outcome.value.structured.sections.map((section) => section.id),
+        },
+        requestId,
+      });
     }
 
     const device = await authenticateDevice(request, env);
