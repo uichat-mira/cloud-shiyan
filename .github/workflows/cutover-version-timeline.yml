@@ -23,6 +23,15 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Read current deployment status
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo '--- deployments status ---'
+          npx --yes wrangler@${WRANGLER_VERSION} deployments status --name mira-shiyan-api --json || true
+          echo '--- deployments list ---'
+          npx --yes wrangler@${WRANGLER_VERSION} deployments list --name mira-shiyan-api --json || true
+
       - name: List Worker versions
         shell: bash
         run: |
