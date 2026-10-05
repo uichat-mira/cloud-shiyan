@@ -41,6 +41,7 @@ jobs:
           config.preview_urls = true;
           config.vars = {
             ...(config.vars ?? {}),
+            R2_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
             CUTOVER_R2_PROBE_TOKEN: process.env.CUTOVER_R2_PROBE_TOKEN,
           };
           fs.writeFileSync('wrangler.r2-probe.json', JSON.stringify(config, null, 2));
