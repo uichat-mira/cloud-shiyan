@@ -127,16 +127,74 @@ export const extractJsonText = (content: string): string => {
   return fenced ? fenced[1].trim() : trimmed;
 };
 
+const parseJson = (text: string): unknown | null => {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+};
+
+const embeddedJsonObjects = (text: string): unknown[] => {
+  const values: unknown[] = [];
+
+  for (let start = 0; start < text.length; start += 1) {
+    if (text[start] !== '{') continue;
+
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+
+    for (let index = start; index < text.length; index += 1) {
+      const character = text[index];
+
+      if (inString) {
+        if (escaped) {
+          escaped = false;
+        } else if (character === '\\') {
+          escaped = true;
+        } else if (character === '"') {
+          inString = false;
+        }
+        continue;
+      }
+
+      if (character === '"') {
+        inString = true;
+        continue;
+      }
+      if (character === '{') depth += 1;
+      if (character === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          const parsed = parseJson(text.slice(start, index + 1));
+          if (parsed !== null) {
+            values.push(parsed);
+            start = index;
+          }
+          break;
+        }
+      }
+    }
+  }
+
+  return values;
+};
+
 export const parseStructuredContent = (
   content: string,
 ): { ok: true; value: unknown } | { ok: false; message: string } => {
   const text = extractJsonText(content);
-  try {
-    return { ok: true, value: JSON.parse(text) as unknown };
-  } catch {
-    return {
-      ok: false,
-      message: 'structured output is not valid JSON',
-    };
+  const direct = parseJson(text);
+  if (direct !== null) return { ok: true, value: direct };
+
+  const embedded = embeddedJsonObjects(text);
+  if (embedded.length === 1) {
+    return { ok: true, value: embedded[0] };
   }
+
+  return {
+    ok: false,
+    message: 'structured output is not valid JSON',
+  };
 };
