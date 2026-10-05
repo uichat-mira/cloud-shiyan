@@ -4,15 +4,6 @@
   "main": "src/api/index.ts",
   "compatibility_date": "2026-08-29",
   "keep_vars": true,
-  "secrets": {
-    "required": [
-      "DEVICE_AUTH_PEPPER",
-      "R2_ACCESS_KEY_ID",
-      "R2_SECRET_ACCESS_KEY",
-      "GITHUB_DESTINATION_TOKEN",
-      "SHIYAN_LLM_CONFIG"
-    ]
-  },
   "observability": { "enabled": true },
   "routes": [
     {
