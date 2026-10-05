@@ -33,6 +33,7 @@ jobs:
           set -euo pipefail
           probe_token="$(openssl rand -hex 32)"
           echo "::add-mask::$probe_token"
+          export CUTOVER_R2_PROBE_TOKEN="$probe_token"
           echo "CUTOVER_R2_PROBE_TOKEN=$probe_token" >> "$GITHUB_ENV"
           node <<'NODE'
           const fs = require('node:fs');
