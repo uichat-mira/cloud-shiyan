@@ -18,7 +18,7 @@ jobs:
       CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
       WRANGLER_VERSION: '4.79.0'
       PRODUCTION_VERSION: '6718c240-9d63-47d8-8aaa-51b241a1fcb4'
-      PREVIEW_VERSION: '1a260cbb-5f4d-4c41-ab8d-676237e6a73d'
+      PREVIEW_VERSION: 'e78ffc9b-42b8-4c86-9082-b9d356f3b528'
     steps:
       - uses: actions/checkout@v4
 
