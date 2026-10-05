@@ -81,6 +81,7 @@ interface Env extends LlmEnvLike {
   UPLOAD_TTL_SECONDS: string;
   DEVICE_AUTH_PEPPER: string;
   CUTOVER_PROBE_TOKEN?: string;
+  CUTOVER_PROBE_EXPIRES_AT?: string;
   GITHUB_DESTINATION_TOKEN: string;
   GITHUB_DESTINATION_OWNER?: string;
   GITHUB_DESTINATION_REPOSITORY?: string;
@@ -661,7 +662,14 @@ export default {
     ) {
       const expectedToken = env.CUTOVER_PROBE_TOKEN?.trim();
       const suppliedToken = request.headers.get('x-cutover-probe-token')?.trim();
-      if (!expectedToken || !suppliedToken || suppliedToken !== expectedToken) {
+      const expiresAt = Date.parse(env.CUTOVER_PROBE_EXPIRES_AT ?? '');
+      if (
+        !expectedToken ||
+        !suppliedToken ||
+        suppliedToken !== expectedToken ||
+        !Number.isFinite(expiresAt) ||
+        Date.now() >= expiresAt
+      ) {
         return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
       }
 
