@@ -5,6 +5,7 @@ on:
     branches: [diag/shiyan-adjust-probe]
     paths:
       - '.github/workflows/cutover-adjust-probe.yml'
+      - 'src/api/index.ts'
 
 permissions:
   contents: read
