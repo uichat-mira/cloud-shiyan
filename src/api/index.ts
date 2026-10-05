@@ -638,6 +638,20 @@ export default {
       return json({ ok: true, data: { service: 'mira-shiyan' }, requestId });
     }
 
+    // Temporary cutover diagnostic: proves Version URLs preserve the
+    // Authorization header without exposing the credential itself.
+    if (request.method === 'GET' && url.pathname === '/__cutover/header-check') {
+      const authorization = request.headers.get('authorization') ?? '';
+      return json({
+        ok: true,
+        data: {
+          authorizationPresent: authorization.length > 0,
+          bearer: /^Bearer\\s+.+$/i.test(authorization),
+        },
+        requestId,
+      });
+    }
+
     const device = await authenticateDevice(request, env);
     if (!device) {
       return errorResponse(requestId, 401, 'device_unauthorized', 'Valid Shiyan device credential required');
