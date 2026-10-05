@@ -1,0 +1,111 @@
+name: Cloud Shiyan cutover auth diagnostic
+
+on:
+  push:
+    branches: [fix/shiyan-cutover-auth-preview]
+    paths:
+      - '.github/workflows/cutover-auth-diagnostic.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: '4.79.0'
+      PRODUCTION_VERSION: '6718c240-9d63-47d8-8aaa-51b241a1fcb4'
+      PREVIEW_VERSION: '1a260cbb-5f4d-4c41-ab8d-676237e6a73d'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Validate Cloudflare authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_API_TOKEN:-}"
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
+
+      - name: Read immutable Worker version metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@${WRANGLER_VERSION} versions view "${PRODUCTION_VERSION}" --name mira-shiyan-api --json > /tmp/production.json
+          npx --yes wrangler@${WRANGLER_VERSION} versions view "${PREVIEW_VERSION}" --name mira-shiyan-api --json > /tmp/preview.json
+
+      - name: Compare binding identities without exposing values
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+
+          const wantedFields = new Set([
+            'name',
+            'type',
+            'database_id',
+            'database_name',
+            'bucket_name',
+            'service',
+            'namespace_id',
+          ]);
+
+          function sanitizeBinding(binding) {
+            if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
+              return binding;
+            }
+            const out = {};
+            for (const [key, value] of Object.entries(binding)) {
+              if (wantedFields.has(key) && ['string', 'number', 'boolean'].includes(typeof value)) {
+                out[key] = value;
+              }
+            }
+            return out;
+          }
+
+          function collectBindings(node, found = []) {
+            if (!node || typeof node !== 'object') return found;
+            if (Array.isArray(node)) {
+              for (const item of node) collectBindings(item, found);
+              return found;
+            }
+            for (const [key, value] of Object.entries(node)) {
+              if (key === 'bindings' && Array.isArray(value)) {
+                found.push(...value.map(sanitizeBinding));
+              } else {
+                collectBindings(value, found);
+              }
+            }
+            return found;
+          }
+
+          function inspect(label, path) {
+            const json = JSON.parse(fs.readFileSync(path, 'utf8'));
+            const bindings = collectBindings(json);
+            const unique = [...new Map(bindings.map((binding) => [
+              JSON.stringify(binding),
+              binding,
+            ])).values()];
+            console.log(JSON.stringify({ label, bindings: unique }, null, 2));
+            return unique;
+          }
+
+          const production = inspect('production', '/tmp/production.json');
+          const preview = inspect('preview', '/tmp/preview.json');
+
+          const has = (bindings, name) =>
+            bindings.some((binding) => binding && binding.name === name);
+
+          for (const required of ['DEVICE_AUTH_PEPPER', 'DB']) {
+            console.log(
+              `${required}: production=${has(production, required)} preview=${has(preview, required)}`,
+            );
+          }
+          NODE
