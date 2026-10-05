@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { ShiyanLlmGateway, resolveLlmSlots, type LlmGatewaySlots } from '../src/shared/llmGateway';
-import type { FetchLike } from '../src/shared/openAiCompatible';
+import {
+  SHIYAN_MAX_OUTPUT_TOKENS,
+  type FetchLike,
+} from '../src/shared/openAiCompatible';
 import {
   BUILT_IN_SCENES,
   isReservedSceneId,
@@ -49,11 +52,11 @@ const makeFetch = (responses: Array<() => Promise<Response> | Response>) => {
   return { fetchLike, calls };
 };
 
-const chatOk = (content: string): Response =>
+const chatOk = (content: string, finishReason = 'stop'): Response =>
   new Response(
     JSON.stringify({
       id: 'chatcmpl-1',
-      choices: [{ message: { content } }],
+      choices: [{ message: { content }, finish_reason: finishReason }],
       usage: { prompt_tokens: 120, completion_tokens: 80, total_tokens: 200 },
     }),
     { status: 200, headers: { 'content-type': 'application/json' } },
@@ -129,6 +132,27 @@ test('Primary provider success records provider, usage and stable markdown', asy
   assert.equal(messages.length, 2);
   assert.match(messages[0].content, /JSON object/u);
   assert.match(messages[1].content, /灰度计划/u);
+});
+
+test('Meeting output budget is large enough for full structured drafts', () => {
+  assert.equal(SHIYAN_MAX_OUTPUT_TOKENS, 8192);
+});
+
+test('Length-truncated provider output is surfaced before JSON parsing', async () => {
+  const { fetchLike, calls } = makeFetch([
+    () => chatOk('{"summary":"truncated","sections":[', 'length'),
+  ]);
+  const outcome = await new ShiyanLlmGateway(
+    slots({ fallback: false }),
+    fetchLike,
+  ).generateStructured(organizeRequest());
+
+  assert.equal(calls.length, 1);
+  assert.equal(outcome.ok, false);
+  if (outcome.ok) return;
+  assert.equal(outcome.error.code, 'output_truncated');
+  assert.equal(outcome.error.kind, 'retryable');
+  assert.match(outcome.error.message, /8192-token limit/u);
 });
 
 test('Primary rate limit fails over to the fallback provider', async () => {
