@@ -35,6 +35,11 @@ export interface LlmEnvLike {
    * Stored as one Cloudflare secret JSON value.
    */
   SHIYAN_LLM_CONFIG?: string;
+  /**
+   * Cutover-only compatibility for one known malformed secret shape.
+   * Strict parsing remains the default; this flag must be set explicitly.
+   */
+  SHIYAN_LLM_CONFIG_REPAIR_SINGLE_QUOTE?: string;
 
   // Legacy compatibility. Used only when SHIYAN_LLM_CONFIG is absent.
   LLM_PRIMARY_PROVIDER?: string;
@@ -68,12 +73,51 @@ const requiredConfigString = (
   return value.trim();
 };
 
-const resolveShiyanConfig = (raw: string): LlmProviderSlot => {
+const isRepairableConfigObject = (
+  value: unknown,
+): value is Record<string, unknown> => {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const config = value as Record<string, unknown>;
+  return (
+    typeof config.baseUrl === 'string' &&
+    Boolean(config.baseUrl.trim()) &&
+    typeof config.model === 'string' &&
+    Boolean(config.model.trim()) &&
+    typeof config.apiKey === 'string' &&
+    Boolean(config.apiKey.trim()) &&
+    (config.provider === undefined || typeof config.provider === 'string')
+  );
+};
+
+const repairSingleMissingDoubleQuote = (raw: string): unknown | null => {
+  const repaired: unknown[] = [];
+  for (let index = 0; index <= raw.length; index += 1) {
+    const candidate = raw.slice(0, index) + '"' + raw.slice(index);
+    try {
+      const parsed = JSON.parse(candidate) as unknown;
+      if (isRepairableConfigObject(parsed)) repaired.push(parsed);
+    } catch {
+      // Only a uniquely valid one-character repair is accepted.
+    }
+  }
+  return repaired.length === 1 ? repaired[0] : null;
+};
+
+const resolveShiyanConfig = (
+  raw: string,
+  allowSingleQuoteRepair = false,
+): LlmProviderSlot => {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
   } catch {
-    throw new Error('SHIYAN_LLM_CONFIG is invalid JSON');
+    if (!allowSingleQuoteRepair) {
+      throw new Error('SHIYAN_LLM_CONFIG is invalid JSON');
+    }
+    parsed = repairSingleMissingDoubleQuote(raw);
+    if (!parsed) {
+      throw new Error('SHIYAN_LLM_CONFIG is invalid JSON');
+    }
   }
 
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
@@ -120,7 +164,10 @@ export const resolveLlmSlots = (env: LlmEnvLike): LlmGatewaySlots => {
   // Legacy primary/fallback variables cannot silently override or extend it.
   if (env.SHIYAN_LLM_CONFIG !== undefined) {
     return {
-      primary: resolveShiyanConfig(env.SHIYAN_LLM_CONFIG),
+      primary: resolveShiyanConfig(
+        env.SHIYAN_LLM_CONFIG,
+        env.SHIYAN_LLM_CONFIG_REPAIR_SINGLE_QUOTE === '1',
+      ),
       fallback: null,
       ...shared,
     };
