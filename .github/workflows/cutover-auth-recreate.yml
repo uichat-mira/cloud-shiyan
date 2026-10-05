@@ -72,10 +72,17 @@ jobs:
           sleep 3
           health_code=$(curl -sS -o /tmp/health.json -w '%{http_code}' "$preview/health")
           unauth_code=$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "$preview/v1/capture-tasks")
+          header_code=$(curl -sS -o /tmp/header.json -w '%{http_code}' \
+            -H 'Authorization: Bearer cutover-header-probe' \
+            "$preview/__cutover/header-check")
           echo "health_status=$health_code"
           echo "unauth_status=$unauth_code"
+          echo "header_status=$header_code"
           test "$health_code" = '200'
           jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null
           test "$unauth_code" = '401'
           jq -e '.ok == false and .error.code == "device_unauthorized"' /tmp/unauth.json >/dev/null
+          test "$header_code" = '200'
+          jq -e '.ok == true and .data.authorizationPresent == true and .data.bearer == true' /tmp/header.json >/dev/null
+          echo 'Version URL Authorization forwarding=PASS'
           echo "Preview URL: $preview"
