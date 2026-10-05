@@ -654,6 +654,23 @@ export default {
       });
     }
 
+    if (request.method === 'GET' && url.pathname === '/__cutover/probe-check') {
+      const expectedToken = env.CUTOVER_PROBE_TOKEN?.trim();
+      const suppliedToken = request.headers.get('x-cutover-probe-token')?.trim();
+      const expiresAt = Date.parse(env.CUTOVER_PROBE_EXPIRES_AT ?? '');
+      return json({
+        ok: true,
+        data: {
+          configured: Boolean(expectedToken),
+          headerPresent: Boolean(suppliedToken),
+          matches: Boolean(expectedToken && suppliedToken && suppliedToken === expectedToken),
+          expiryValid: Number.isFinite(expiresAt),
+          notExpired: Number.isFinite(expiresAt) && Date.now() < expiresAt,
+        },
+        requestId,
+      });
+    }
+
     // Temporary branch-only cutover probe. It is enabled only on an
     // explicitly uploaded preview version with a runtime-only random token.
     if (
