@@ -1,10 +1,6 @@
 name: Cloud Shiyan cutover preview
 
 on:
-  push:
-    branches: [fix/shiyan-cutover-auth-preview]
-    paths:
-      - '.github/workflows/cutover-preview.yml'
   workflow_dispatch:
     inputs:
       confirm:
@@ -21,7 +17,7 @@ concurrency:
 
 jobs:
   preview:
-    if: ${{ github.event_name == 'push' || inputs.confirm == 'upload-preview' }}
+    if: ${{ inputs.confirm == 'upload-preview' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
