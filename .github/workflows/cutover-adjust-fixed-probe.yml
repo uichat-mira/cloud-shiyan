@@ -1,0 +1,77 @@
+name: Cloud Shiyan fixed adjust probe
+
+on:
+  push:
+    branches: [diag/shiyan-adjust-fixed-probe]
+    paths:
+      - '.github/workflows/cutover-adjust-fixed-probe.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: '4.79.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Use npm 11
+        run: npm install --global npm@11
+
+      - name: Build isolated probe config
+        shell: bash
+        run: |
+          set -euo pipefail
+          token="$(openssl rand -hex 32)"
+          echo "::add-mask::$token"
+          export CUTOVER_ADJUST_PROBE_TOKEN="$token"
+          echo "CUTOVER_ADJUST_PROBE_TOKEN=$token" >> "$GITHUB_ENV"
+          node <<'NODE'
+          const fs = require('node:fs');
+          const config = JSON.parse(fs.readFileSync('wrangler.jsonc','utf8'));
+          config.preview_urls = true;
+          config.vars = {
+            ...(config.vars ?? {}),
+            R2_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+            SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE: '1',
+            CUTOVER_ADJUST_PROBE_TOKEN: process.env.CUTOVER_ADJUST_PROBE_TOKEN,
+          };
+          fs.writeFileSync('wrangler.adjust-fixed-probe.json', JSON.stringify(config, null, 2));
+          NODE
+
+      - name: Validate and upload immutable probe
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm install --no-audit --no-fund
+          npm run typecheck
+          npm test
+          npx wrangler versions upload -c wrangler.adjust-fixed-probe.json | tee /tmp/upload.log
+          preview_url="$(sed -n 's/.*Version Preview URL: //p' /tmp/upload.log | tail -n1)"
+          test -n "$preview_url"
+          echo "ADJUST_PROBE_URL=$preview_url" >> "$GITHUB_ENV"
+          echo "Immutable preview URL: $preview_url"
+          echo 'No production deployment performed.'
+
+      - name: Exercise fixed real-provider adjust path
+        shell: bash
+        run: |
+          set -euo pipefail
+          code=$(curl -sS -o /tmp/result.json -w '%{http_code}' \
+            -X POST \
+            -H "X-Cutover-Adjust-Probe-Token: $CUTOVER_ADJUST_PROBE_TOKEN" \
+            "$ADJUST_PROBE_URL/__cutover/adjust-probe")
+          echo "adjust_probe_status=$code"
+          jq -c . /tmp/result.json
+          test "$code" = '200'
+          jq -e '.ok == true and .data.summaryPresent == true and (.data.sectionIds|length) == 3' /tmp/result.json >/dev/null
+          echo 'ADJUST_DRAFT_PROBE=PASS'
