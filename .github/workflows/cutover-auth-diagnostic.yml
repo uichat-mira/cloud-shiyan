@@ -57,6 +57,22 @@ jobs:
             'namespace_id',
           ]);
 
+          function rawBindings(node, found = []) {
+            if (!node || typeof node !== 'object') return found;
+            if (Array.isArray(node)) {
+              for (const item of node) rawBindings(item, found);
+              return found;
+            }
+            for (const [key, value] of Object.entries(node)) {
+              if (key === 'bindings' && Array.isArray(value)) {
+                found.push(...value);
+              } else {
+                rawBindings(value, found);
+              }
+            }
+            return found;
+          }
+
           function sanitizeBinding(binding) {
             if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
               return binding;
@@ -70,30 +86,29 @@ jobs:
             return out;
           }
 
-          function collectBindings(node, found = []) {
-            if (!node || typeof node !== 'object') return found;
-            if (Array.isArray(node)) {
-              for (const item of node) collectBindings(item, found);
-              return found;
-            }
-            for (const [key, value] of Object.entries(node)) {
-              if (key === 'bindings' && Array.isArray(value)) {
-                found.push(...value.map(sanitizeBinding));
-              } else {
-                collectBindings(value, found);
-              }
-            }
-            return found;
-          }
-
           function inspect(label, path) {
             const json = JSON.parse(fs.readFileSync(path, 'utf8'));
-            const bindings = collectBindings(json);
+            const raw = rawBindings(json);
+            const bindings = raw.map(sanitizeBinding);
             const unique = [...new Map(bindings.map((binding) => [
               JSON.stringify(binding),
               binding,
             ])).values()];
-            console.log(JSON.stringify({ label, bindings: unique }, null, 2));
+            const auth = raw.find(
+              (binding) => binding && binding.name === 'DEVICE_AUTH_PEPPER',
+            );
+            const authShape = auth && typeof auth === 'object'
+              ? Object.fromEntries(
+                  Object.entries(auth).map(([key, value]) => [
+                    key,
+                    {
+                      type: Array.isArray(value) ? 'array' : typeof value,
+                      redacted: key !== 'name' && key !== 'type',
+                    },
+                  ]),
+                )
+              : null;
+            console.log(JSON.stringify({ label, bindings: unique, authShape }, null, 2));
             return unique;
           }
 
