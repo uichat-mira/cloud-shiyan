@@ -646,7 +646,7 @@ export default {
         ok: true,
         data: {
           authorizationPresent: authorization.length > 0,
-          bearer: /^Bearer\\s+.+$/i.test(authorization),
+          bearer: /^Bearer\s+.+$/i.test(authorization),
         },
         requestId,
       });
