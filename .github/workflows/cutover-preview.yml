@@ -1,0 +1,120 @@
+name: Cloud Shiyan cutover preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type upload-preview to upload a non-production Worker version'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cloud-shiyan-cutover-preview
+  cancel-in-progress: false
+
+jobs:
+  preview:
+    if: ${{ inputs.confirm == 'upload-preview' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      WRANGLER_VERSION: '4.79.0'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Use npm 11
+        run: npm install --global npm@11
+
+      - name: Validate shared Cloudflare deployment authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${CLOUDFLARE_API_TOKEN:-}" || { echo 'Missing CLOUDFLARE_API_TOKEN'; exit 1; }
+          test -n "${CLOUDFLARE_ACCOUNT_ID:-}" || { echo 'Missing CLOUDFLARE_ACCOUNT_ID'; exit 1; }
+
+      - name: Build non-production preview config
+        shell: bash
+        run: |
+          set -euo pipefail
+          node <<'NODE'
+          const fs = require('node:fs');
+          const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
+          config.preview_urls = true;
+          config.vars = {
+            ...(config.vars ?? {}),
+            R2_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+            SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE: '1',
+          };
+          fs.writeFileSync('wrangler.preview.json', JSON.stringify(config, null, 2));
+          NODE
+
+      - name: Require target runtime secrets before any upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          output=$(npx --yes wrangler@${WRANGLER_VERSION} secret list -c wrangler.preview.json)
+          required=(
+            DEVICE_AUTH_PEPPER
+            R2_ACCESS_KEY_ID
+            R2_SECRET_ACCESS_KEY
+            GITHUB_DESTINATION_TOKEN
+            SHIYAN_LLM_CONFIG
+          )
+          missing=0
+          for name in "${required[@]}"; do
+            if grep -Eq "\"name\"[[:space:]]*:[[:space:]]*\"${name}\"" <<<"$output"; then
+              echo "${name}=PRESENT"
+            else
+              echo "::error::${name}=MISSING on mira-shiyan-api"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - name: Install project dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Validate source contracts before upload
+        run: npm run typecheck && npm test
+
+      - name: Dry-run effective preview config
+        run: npx wrangler deploy --dry-run -c wrangler.preview.json
+
+      - name: Upload version only — do not deploy production traffic
+        id: upload
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx wrangler versions upload --preview-alias shiyan-cutover -c wrangler.preview.json | tee /tmp/upload.log
+          version_id="$(sed -n 's/.*Worker Version ID: //p' /tmp/upload.log | tail -n1)"
+          preview_url="$(sed -n 's/.*Version Preview URL: //p' /tmp/upload.log | tail -n1)"
+          test -n "$version_id"
+          test -n "$preview_url"
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+          echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
+          echo "Worker Version ID: $version_id"
+          echo "Immutable preview URL: $preview_url"
+          echo 'Version uploaded only. Production deployment and route traffic were not changed.'
+
+      - name: Smoke immutable preview boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview="${{ steps.upload.outputs.preview_url }}"
+          health_code=$(curl -sS -o /tmp/health.json -w '%{http_code}' "$preview/health")
+          unauth_code=$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "$preview/v1/scenes")
+          echo "health_status=$health_code"
+          echo "unauth_status=$unauth_code"
+          test "$health_code" = '200'
+          jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null
+          test "$unauth_code" = '401'
+          jq -e '.ok == false and .error.code == "device_unauthorized"' /tmp/unauth.json >/dev/null
