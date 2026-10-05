@@ -399,11 +399,31 @@ test('Structured validation reports diagnosable issues per path', () => {
   assert.equal(valid.ok, true);
 });
 
-test('parseStructuredContent tolerates fences but rejects non-JSON payloads', () => {
+test('parseStructuredContent tolerates one embedded JSON object but rejects ambiguity', () => {
   const fenced = parseStructuredContent('```json\n{"summary":"x"}\n```');
   assert.equal(fenced.ok, true);
+
   const plain = parseStructuredContent('{"summary":"x"}');
   assert.equal(plain.ok, true);
+
+  const explained = parseStructuredContent(
+    'I considered the adjustment carefully. Final answer: {"summary":"x","sections":[]}',
+  );
+  assert.equal(explained.ok, true);
+  if (explained.ok) {
+    assert.deepEqual(explained.value, { summary: 'x', sections: [] });
+  }
+
+  const bracesInsideString = parseStructuredContent(
+    'Result: {"summary":"keep {this} text","sections":[]}',
+  );
+  assert.equal(bracesInsideString.ok, true);
+
+  const ambiguous = parseStructuredContent(
+    'First {"summary":"a"} then {"summary":"b"}',
+  );
+  assert.equal(ambiguous.ok, false);
+
   const prose = parseStructuredContent('Here is your summary.');
   assert.equal(prose.ok, false);
 });
