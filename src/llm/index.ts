@@ -18,13 +18,13 @@ export type { AdjustRequest, LlmOutcome, OrganizeRequest } from '../shared/llm';
  * separate deployment unit again.
  */
 export function createShiyanLlmService(env: LlmEnvLike): ShiyanLlmBinding {
-  const gateway = new ShiyanLlmGateway(resolveLlmSlots(env));
+  const gateway = () => new ShiyanLlmGateway(resolveLlmSlots(env));
   return {
-    generateStructured(input: OrganizeRequest): Promise<LlmOutcome> {
-      return gateway.generateStructured(input);
+    async generateStructured(input: OrganizeRequest): Promise<LlmOutcome> {
+      return gateway().generateStructured(input);
     },
-    adjustDraft(input: AdjustRequest): Promise<LlmOutcome> {
-      return gateway.adjustDraft(input);
+    async adjustDraft(input: AdjustRequest): Promise<LlmOutcome> {
+      return gateway().adjustDraft(input);
     },
   };
 }
