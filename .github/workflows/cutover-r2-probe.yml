@@ -46,6 +46,22 @@ jobs:
           fs.writeFileSync('wrangler.r2-probe.json', JSON.stringify(config, null, 2));
           NODE
 
+      - name: Inspect R2 bucket location
+        shell: bash
+        run: |
+          set -euo pipefail
+          npx --yes wrangler@${WRANGLER_VERSION} r2 bucket info mira-shiyan-audio --json | tee /tmp/r2-bucket.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const value = JSON.parse(fs.readFileSync('/tmp/r2-bucket.json', 'utf8'));
+          console.log(JSON.stringify({
+            name: value.name ?? null,
+            jurisdiction: value.jurisdiction ?? null,
+            location: value.location ?? value.locationHint ?? null,
+            storageClass: value.defaultStorageClass ?? value.storage_class ?? null,
+          }));
+          NODE
+
       - name: Upload immutable probe version
         shell: bash
         run: |
