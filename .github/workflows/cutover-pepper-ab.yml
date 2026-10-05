@@ -5,6 +5,9 @@ on:
     branches: [fix/shiyan-cutover-auth-preview]
     paths:
       - '.github/workflows/cutover-pepper-ab.yml'
+      - 'src/api/index.ts'
+      - 'src/llm/index.ts'
+      - 'tests/llm-config.test.ts'
 
 permissions:
   contents: read
@@ -99,6 +102,9 @@ jobs:
 
           echo "candidate_auth_status=$candidate_code"
           echo "production_auth_status=$production_code"
+          if [ "$candidate_code" != '200' ]; then
+            jq -c '{ok, error}' /tmp/candidate.json || true
+          fi
 
           test "$candidate_code" = '200'
 
