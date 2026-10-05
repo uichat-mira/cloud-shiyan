@@ -49,6 +49,10 @@ jobs:
           const fs = require('node:fs');
           const config = JSON.parse(fs.readFileSync('wrangler.jsonc', 'utf8'));
           config.preview_urls = true;
+          config.vars = {
+            ...(config.vars ?? {}),
+            R2_ACCOUNT_ID: process.env.CLOUDFLARE_ACCOUNT_ID,
+          };
           fs.writeFileSync('wrangler.preview.json', JSON.stringify(config, null, 2));
           NODE
 
