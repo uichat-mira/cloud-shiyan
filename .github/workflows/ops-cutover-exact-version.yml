@@ -1,4 +1,5 @@
 name: Cloud Shiyan exact-version production cutover
+# one-shot trigger via audited prod PR merge
 
 on:
   push:
