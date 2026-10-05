@@ -1,5 +1,4 @@
 name: Cloud Shiyan exact-version production cutover
-# one-shot trigger via audited prod PR merge
 
 on:
   push:
@@ -14,7 +13,6 @@ concurrency:
 
 jobs:
   cutover:
-    if: ${{ github.event.head_commit.message == 'ops: cut over Shiyan exact version 4b039f12' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -24,43 +22,58 @@ jobs:
       WORKER_NAME: mira-shiyan-api
       TARGET_VERSION: 4b039f12-0bdc-433a-9553-00ad72a28426
       ROLLBACK_VERSION: 720f2952-78d3-4d61-848b-8f82b956e498
+      CUTOVER_MARKER: 'ops: cut over Shiyan exact version 4b039f12'
     steps:
-      - name: Validate deployment authority and exact versions
+      - name: Execute guarded exact-version cutover
         shell: bash
         run: |
           set -euo pipefail
+
+          message="$(jq -r '.head_commit.message // ""' "$GITHUB_EVENT_PATH" | head -n1)"
+          if [ "$message" != "$CUTOVER_MARKER" ]; then
+            echo "Not the authorized one-shot cutover marker; no production action."
+            exit 0
+          fi
+
           test -n "${CLOUDFLARE_API_TOKEN:-}"
           test -n "${CLOUDFLARE_ACCOUNT_ID:-}"
-          npx --yes wrangler@${WRANGLER_VERSION} versions list --name "${WORKER_NAME}" --json > /tmp/versions.json
-          grep -Fq "${TARGET_VERSION}" /tmp/versions.json
-          grep -Fq "${ROLLBACK_VERSION}" /tmp/versions.json
-          npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/before.json
-          echo "Pre-cutover deployment status:"
-          cat /tmp/before.json
 
-      - name: Promote exact reviewed version to 100 percent
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "Pre-cutover production status:"
+          npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/before.json
+          cat /tmp/before.json
+          grep -Fq "${ROLLBACK_VERSION}" /tmp/before.json
+
+          deployed=0
+          rollback() {
+            if [ "$deployed" = "1" ]; then
+              echo "::error::Cutover verification failed; restoring ${ROLLBACK_VERSION} at 100%"
+              npx --yes wrangler@${WRANGLER_VERSION} versions deploy "${ROLLBACK_VERSION}@100%" \
+                --name "${WORKER_NAME}" \
+                --message "Automatic rollback after Cloud Shiyan cutover verification failure" \
+                -y
+              npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/rollback.json
+              cat /tmp/rollback.json
+              grep -Fq "${ROLLBACK_VERSION}" /tmp/rollback.json
+            fi
+          }
+          trap rollback ERR
+
+          echo "Promoting exact reviewed version ${TARGET_VERSION} to 100%."
           npx --yes wrangler@${WRANGLER_VERSION} versions deploy "${TARGET_VERSION}@100%" \
             --name "${WORKER_NAME}" \
             --message "Cloud Shiyan Organization cutover #3" \
             -y
+          deployed=1
 
-      - name: Verify exact production deployment and T5 boundary
-        id: smoke
-        shell: bash
-        run: |
-          set -euo pipefail
+          echo "Post-cutover production status:"
           npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/after.json
-          echo "Post-cutover deployment status:"
           cat /tmp/after.json
           grep -Fq "${TARGET_VERSION}" /tmp/after.json
 
           ok=0
           for attempt in 1 2 3 4 5 6; do
-            health_code=$(curl -sS --max-time 15 -o /tmp/health.json -w '%{http_code}' https://shiyan-api.tomz.io/health || true)
-            unauth_code=$(curl -sS --max-time 15 -o /tmp/unauth.json -w '%{http_code}' https://shiyan-api.tomz.io/v1/scenes || true)
+            health_code="$(curl -sS --max-time 15 -o /tmp/health.json -w '%{http_code}' https://shiyan-api.tomz.io/health || true)"
+            unauth_code="$(curl -sS --max-time 15 -o /tmp/unauth.json -w '%{http_code}' https://shiyan-api.tomz.io/v1/scenes || true)"
             echo "attempt=${attempt} health=${health_code} unauth=${unauth_code}"
             if [ "${health_code}" = "200" ] \
               && jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null 2>&1 \
@@ -71,18 +84,7 @@ jobs:
             fi
             sleep 5
           done
-          test "${ok}" = "1"
 
-      - name: Roll back automatically if production T5 fails
-        if: ${{ failure() && steps.smoke.outcome == 'failure' }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "::error::Production T5 failed; restoring rollback version ${ROLLBACK_VERSION}"
-          npx --yes wrangler@${WRANGLER_VERSION} versions deploy "${ROLLBACK_VERSION}@100%" \
-            --name "${WORKER_NAME}" \
-            --message "Automatic rollback after Cloud Shiyan cutover T5 failure" \
-            -y
-          npx --yes wrangler@${WRANGLER_VERSION} deployments status --name "${WORKER_NAME}" --json > /tmp/rollback.json
-          cat /tmp/rollback.json
-          grep -Fq "${ROLLBACK_VERSION}" /tmp/rollback.json
+          test "$ok" = "1"
+          trap - ERR
+          echo "CUTOVER_T5=PASS"
