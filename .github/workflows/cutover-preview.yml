@@ -85,8 +85,31 @@ jobs:
         run: npx wrangler deploy --dry-run -c wrangler.preview.json
 
       - name: Upload version only — do not deploy production traffic
+        id: upload
         shell: bash
         run: |
           set -euo pipefail
-          npx wrangler versions upload --preview-alias shiyan-cutover -c wrangler.preview.json
+          npx wrangler versions upload --preview-alias shiyan-cutover -c wrangler.preview.json | tee /tmp/upload.log
+          version_id="$(sed -n 's/.*Worker Version ID: //p' /tmp/upload.log | tail -n1)"
+          preview_url="$(sed -n 's/.*Version Preview URL: //p' /tmp/upload.log | tail -n1)"
+          test -n "$version_id"
+          test -n "$preview_url"
+          echo "version_id=$version_id" >> "$GITHUB_OUTPUT"
+          echo "preview_url=$preview_url" >> "$GITHUB_OUTPUT"
+          echo "Worker Version ID: $version_id"
+          echo "Immutable preview URL: $preview_url"
           echo 'Version uploaded only. Production deployment and route traffic were not changed.'
+
+      - name: Smoke immutable preview boundary
+        shell: bash
+        run: |
+          set -euo pipefail
+          preview="${{ steps.upload.outputs.preview_url }}"
+          health_code=$(curl -sS -o /tmp/health.json -w '%{http_code}' "$preview/health")
+          unauth_code=$(curl -sS -o /tmp/unauth.json -w '%{http_code}' "$preview/v1/scenes")
+          echo "health_status=$health_code"
+          echo "unauth_status=$unauth_code"
+          test "$health_code" = '200'
+          jq -e '.ok == true and .data.service == "mira-shiyan"' /tmp/health.json >/dev/null
+          test "$unauth_code" = '401'
+          jq -e '.ok == false and .error.code == "device_unauthorized"' /tmp/unauth.json >/dev/null
