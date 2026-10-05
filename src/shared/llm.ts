@@ -7,6 +7,7 @@ export type LlmFailureCode =
   | 'timeout'
   | 'invalid_request'
   | 'invalid_response'
+  | 'output_truncated'
   | 'not_configured';
 
 export interface LlmFailure {
