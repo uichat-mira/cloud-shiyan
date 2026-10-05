@@ -724,6 +724,31 @@ export default {
                 typeof rawConfig === 'string' && rawConfig.includes('model'),
               hasApiKeyKey:
                 typeof rawConfig === 'string' && rawConfig.includes('apiKey'),
+              singleQuoteRepair: (() => {
+                if (typeof rawConfig !== 'string') return { candidates: 0, positions: [] as number[] };
+                const positions: number[] = [];
+                for (let index = 0; index <= rawConfig.length; index += 1) {
+                  const candidate =
+                    rawConfig.slice(0, index) + '"' + rawConfig.slice(index);
+                  try {
+                    const parsed = JSON.parse(candidate) as Record<string, unknown>;
+                    if (
+                      parsed &&
+                      typeof parsed === 'object' &&
+                      !Array.isArray(parsed) &&
+                      typeof parsed.provider === 'string' &&
+                      typeof parsed.baseUrl === 'string' &&
+                      typeof parsed.model === 'string' &&
+                      typeof parsed.apiKey === 'string'
+                    ) {
+                      positions.push(index);
+                    }
+                  } catch {
+                    // Not the single missing quote position.
+                  }
+                }
+                return { candidates: positions.length, positions };
+              })(),
               legacyPrimary: {
                 provider: Boolean(env.LLM_PRIMARY_PROVIDER?.trim()),
                 baseUrl: Boolean(env.LLM_PRIMARY_BASE_URL?.trim()),
