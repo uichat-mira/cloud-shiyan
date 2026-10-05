@@ -72,6 +72,47 @@ test('malformed SHIYAN_LLM_CONFIG fails closed without echoing secret contents',
   );
 });
 
+test('single missing double quote repair stays opt-in and uniquely restores the cutover config', () => {
+  const valid = JSON.stringify({
+    provider: 'openai-compatible',
+    baseUrl: 'https://llm.example.com/v1',
+    model: 'shiyan-model',
+    apiKey: 'shiyan-secret',
+  });
+  const malformed = valid.replace(
+    'https://llm.example.com/v1"',
+    'https://llm.example.com/v1',
+  );
+
+  assert.throws(
+    () => resolveLlmSlots({ SHIYAN_LLM_CONFIG: malformed }),
+    /SHIYAN_LLM_CONFIG is invalid JSON/u,
+  );
+
+  const resolved = resolveLlmSlots({
+    SHIYAN_LLM_CONFIG: malformed,
+    SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE: '1',
+  });
+
+  assert.deepEqual(resolved.primary, {
+    provider: 'openai-compatible',
+    baseUrl: 'https://llm.example.com/v1',
+    model: 'shiyan-model',
+    apiKey: 'shiyan-secret',
+  });
+});
+
+test('cutover repair still fails closed when no unique one-quote repair exists', () => {
+  assert.throws(
+    () =>
+      resolveLlmSlots({
+        SHIYAN_LLM_CONFIG: '{not-json-secret-value',
+        SHIYAN_LLM_CONFIG_REPAIR_SINGLE_MISSING_DOUBLE_QUOTE: '1',
+      }),
+    /SHIYAN_LLM_CONFIG is invalid JSON/u,
+  );
+});
+
 test('incomplete SHIYAN_LLM_CONFIG fails closed with a field-level diagnostic', () => {
   assert.throws(
     () =>
