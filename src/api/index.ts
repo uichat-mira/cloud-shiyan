@@ -650,7 +650,35 @@ export default {
       const scene = BUILT_IN_SCENES.find((item) => item.id === 'quick-note')!;
       let outcome;
       try {
-        outcome = await createShiyanLlmService(env).adjustDraft({
+        const rawConfig = env.SHIYAN_LLM_CONFIG;
+        let probeEnv: Env = env;
+        if (typeof rawConfig === 'string') {
+          const repairs: string[] = [];
+          for (let index = 0; index <= rawConfig.length; index += 1) {
+            const candidate =
+              rawConfig.slice(0, index) + '"' + rawConfig.slice(index);
+            try {
+              const parsed = JSON.parse(candidate) as Record<string, unknown>;
+              if (
+                parsed &&
+                typeof parsed === 'object' &&
+                !Array.isArray(parsed) &&
+                typeof parsed.provider === 'string' &&
+                typeof parsed.baseUrl === 'string' &&
+                typeof parsed.model === 'string' &&
+                typeof parsed.apiKey === 'string'
+              ) {
+                repairs.push(candidate);
+              }
+            } catch {
+              // Ignore non-unique invalid repairs.
+            }
+          }
+          if (repairs.length === 1) {
+            probeEnv = { ...env, SHIYAN_LLM_CONFIG: repairs[0] };
+          }
+        }
+        outcome = await createShiyanLlmService(probeEnv).adjustDraft({
           taskId: 'cutover-adjust-probe',
           correlationId: requestId,
           scene,
