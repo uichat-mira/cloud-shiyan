@@ -162,6 +162,33 @@ test('resolver never falls back to legacy for a rejected compact JWS', async () 
   });
 });
 
+test('malformed three-segment Cloud candidates cannot fall through to legacy lookup', async () => {
+  const key = await createTestSigningKey();
+  const config = await verifyConfig(key);
+  let legacyLookups = 0;
+
+  for (const malformed of ['aaa..ccc', 'aaa.bbb.!', '.bbb.ccc', 'aaa.bbb.']) {
+    assert.equal(isCloudCredentialCandidate(malformed), true);
+
+    const result = await resolveShiyanRequestAuth(requestWith(`Bearer ${malformed}`), {
+      authenticateCloud: (token) => verifyCloudShiyanCredential(token, config),
+      lookupLegacyDevice: async () => {
+        legacyLookups += 1;
+        return {
+          kind: 'legacy-device',
+          legacyDeviceId: 'should-never-authorize',
+          userId: null,
+        };
+      },
+    });
+    assert.deepEqual(result, {
+      kind: 'cloud-credential-rejected',
+      reason: 'malformed_token',
+    });
+  }
+  assert.equal(legacyLookups, 0);
+});
+
 test('JWKS loader uses the trusted URL, caches for at most 300 seconds, and refreshes after expiry', async () => {
   const key = await createTestSigningKey();
   const url = `https://cloud-auth.test/${crypto.randomUUID()}/.well-known/jwks.json`;
