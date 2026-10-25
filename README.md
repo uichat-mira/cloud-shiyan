@@ -145,6 +145,8 @@ The empty repository was initialized on `prod` solely to establish the first Git
 
 CI validates static/deployability checks plus the Organization test layers used by this repository: T1 Unit, T2 Contract, and T3 Worker Runtime integration, aggregated by `Mira Gate`.
 
+External Worker Draft PRs may need a trusted maintainer to approve GitHub's workflow execution or trigger a new PR CI run. An `action_required` workflow with no jobs is **not** a passed CI gate; the Worker's own verification output and SonarCloud Quality Gate are supplementary, not substitutes for the independent T1/T2/T3 and `Mira Gate` checks. Keep the PR in Draft until those checks execute and their evidence is reviewed.
+
 ## Cutover strategy
 
 Production traffic is not the first live test. The migration uses Cloudflare Worker versions in two separate operations:
