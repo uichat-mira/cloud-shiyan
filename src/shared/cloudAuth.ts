@@ -19,7 +19,7 @@ const MAX_CREDENTIAL_TTL_SECONDS = 600;
 const MAX_CLOCK_SKEW_SECONDS = 60;
 const JWKS_CACHE_MAX_ENTRIES = 4;
 const BASE64URL_SEGMENT = /^[A-Za-z0-9_-]+$/;
-const COMPACT_JWS_SHAPE = /^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const COMPACT_JWS_SEGMENTS = 3;
 const KEY_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
 const SHIYAN_CLAIM_NAMES = new Set([
   'iss',
@@ -623,12 +623,13 @@ export function readBearerCredential(request: Request): string | null {
 }
 
 /**
- * A compact-JWS-shaped credential is always treated as a Mira Cloud credential.
- * It never falls back to the legacy Shiyan device lookup after verification
- * fails. Opaque legacy device credentials therefore must not use this shape.
+ * Treat every three-segment candidate as Cloud Auth, even when its base64url
+ * is malformed. Otherwise a corrupted JWT might be attempted as a legacy
+ * device credential instead of failing closed. Opaque legacy credentials
+ * must not contain exactly two dots.
  */
 export function isCloudCredentialCandidate(credential: string): boolean {
-  return COMPACT_JWS_SHAPE.test(credential);
+  return credential.split('.').length === COMPACT_JWS_SEGMENTS;
 }
 
 export async function resolveShiyanRequestAuth(
