@@ -28,6 +28,7 @@ export default defineConfig({
           R2_ACCESS_KEY_ID: 'test-access-key',
           R2_SECRET_ACCESS_KEY: 'test-secret-key',
           DEVICE_AUTH_PEPPER: 'test-pepper',
+          CLOUD_AUTH_JWKS_URL: 'https://cloud-auth.test/.well-known/jwks.json',
           GITHUB_DESTINATION_TOKEN: 'test-github-token',
           LLM_TIMEOUT_MS: '120000',
           LLM_MAX_TRANSCRIPT_CHARS: '200000',
