@@ -1,0 +1,139 @@
+# Cloud Shiyan caller: dispatch from default branch (prod), deliver implementation PRs to dev.
+name: Mira External Worker
+
+on:
+  # Only newly created comments are dispatch candidates. Edits never restart work.
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      issue_number:
+        description: Open GitHub Issue number to execute
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# The entire dispatch is serialized by Issue, not only the entrypoint guard.
+# A queued comment is revalidated in enrollment after the preceding run ends.
+concurrency:
+  group: >-
+    ${{
+      github.event_name == 'issue_comment' && (
+        github.event.issue.pull_request ||
+        github.event.comment.user.type != 'User' ||
+        github.event.sender.login != github.event.comment.user.login ||
+        github.actor != github.event.comment.user.login ||
+        github.event.comment.body != '/worker run'
+      )
+      && format('mira-worker-ignored-{0}', github.run_id)
+      || format('mira-worker-{0}-{1}', github.repository, github.event_name == 'issue_comment' && github.event.issue.number || inputs.issue_number)
+    }}
+  queue: max
+  cancel-in-progress: false
+
+jobs:
+  enrollment:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'issue_comment' && github.event.action == 'created' && startsWith(github.event.comment.body, '/worker'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: read
+    outputs:
+      issue_number: ${{ steps.guard.outputs.issue_number }}
+    steps:
+      - name: Verify trusted paid Worker dispatch
+        id: guard
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          EVENT_NAME: ${{ github.event_name }}
+          DISPATCH_ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ACTOR: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          # The comment event must execute the reviewed default-branch caller.
+          # Existing workflow_dispatch continues to support branch selection.
+          if test "$EVENT_NAME" = issue_comment && test "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH"; then
+            echo "::error::Issue-comment dispatch must run on the default branch."
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/branches/dev" --jq '.name' >/dev/null
+
+          if test "$EVENT_NAME" = issue_comment; then
+            test -s "$GITHUB_EVENT_PATH"
+            issue_number="$(jq -er '.issue.number | numbers' "$GITHUB_EVENT_PATH")"
+            state="$(jq -r '.issue.state // empty' "$GITHUB_EVENT_PATH")"
+            comment_author="$(jq -r '.comment.user.login // empty' "$GITHUB_EVENT_PATH")"
+            sender="$(jq -r '.sender.login // empty' "$GITHUB_EVENT_PATH")"
+            author_type="$(jq -r '.comment.user.type // empty' "$GITHUB_EVENT_PATH")"
+            issue_is_pr="$(jq -r 'has("issue") and (.issue | has("pull_request"))' "$GITHUB_EVENT_PATH")"
+            comment_id="$(jq -er '.comment.id | numbers' "$GITHUB_EVENT_PATH")"
+            test "$state" = open && test "$issue_is_pr" = false ||
+              { echo "::error::Only an open ordinary Issue is dispatchable." >&2; exit 1; }
+            test -n "$comment_author" && test "$comment_author" = "$ACTOR" &&
+              test "$sender" = "$ACTOR" && test "$author_type" = User ||
+              { echo "::error::Issue comment must be authored by the actual human event actor." >&2; exit 1; }
+            case "$issue_number:$comment_id" in
+              *[!0-9:]*|0:*|*:0|:*)
+                echo "::error::Invalid Issue or comment identity." >&2; exit 1 ;;
+            esac
+            # jq compares the complete JSON string; trailing newline must not be stripped.
+            jq -e '.comment.body == "/worker run"' "$GITHUB_EVENT_PATH" >/dev/null ||
+              { echo "::error::Use exactly /worker run as the complete Issue comment." >&2; exit 1; }
+            # Reject removed, edited, or substituted comments at execution time.
+            comment_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/comments/$comment_id")"
+            jq -e --slurpfile event "$GITHUB_EVENT_PATH" '
+              .id == $event[0].comment.id and
+              .user.id == $event[0].comment.user.id and
+              .user.login == $event[0].comment.user.login and
+              .user.type == "User" and
+              .issue_url == $event[0].issue.url and
+              .body == $event[0].comment.body
+            ' <<< "$comment_json" >/dev/null ||
+              { echo "::error::Dispatch comment no longer matches the created event." >&2; exit 1; }
+
+            # Use live collaborator permission, not author_association.
+            permission="$(gh api "repos/$GITHUB_REPOSITORY/collaborators/$comment_author/permission" --jq '.permission')"
+            case "$permission" in
+              write|maintain|admin) ;;
+              *) echo "::error::Dispatcher lacks current repository write permission." >&2; exit 1 ;;
+            esac
+            issue_json="$(gh api "repos/$GITHUB_REPOSITORY/issues/$issue_number")"
+            test "$(jq -r '.state' <<< "$issue_json")" = open &&
+              test "$(jq -r 'has("pull_request")' <<< "$issue_json")" = false &&
+              test "$(jq -r '.body // "" | gsub("[[:space:]]"; "") | length' <<< "$issue_json")" -gt 0 ||
+              { echo "::error::Issue closed, is a PR, or has no task contract." >&2; exit 1; }
+          else
+            # Preserve the existing manually authorized workflow_dispatch route.
+            issue_number="$DISPATCH_ISSUE_NUMBER"
+          fi
+
+          case "$issue_number" in
+            ''|0*|*[!0-9]*)
+              echo "::error::Issue number must be a positive decimal integer." >&2; exit 1 ;;
+          esac
+          echo "issue_number=$issue_number" >> "$GITHUB_OUTPUT"
+
+  worker:
+    needs: enrollment
+    permissions:
+      contents: write
+      issues: read
+      pull-requests: write
+    uses: uichat-mira/.github/.github/workflows/mira-external-worker.yml@1380017dbedd147fdfec4c5b2404443e12967182
+    with:
+      issue_number: ${{ fromJSON(needs.enrollment.outputs.issue_number) }}
+      base_branch: dev
+      timeout_minutes: 60
+      verification_command: |
+        NODE_BIN="$(find /opt/hostedtoolcache/node -path '*/24.*/x64/bin/node' -print | sort -V | tail -n 1)"
+        test -n "$NODE_BIN"
+        export PATH="$(dirname "$NODE_BIN"):$PATH"
+        node --version
+        npm install --no-audit --no-fund
+        npm run check
+    secrets:
+      opencode_go_api_key: ${{ secrets.AI_PROVIDER_OPENCODE_GO_KEY }}
