@@ -102,6 +102,37 @@ Malformed or incomplete `SHIYAN_LLM_CONFIG` fails closed with a configuration di
 
 The existing Shiyan device credential remains a compatibility mechanism during bootstrap. It must not be promoted into the organization-wide authentication design. Cloud Shiyan is expected to converge on Mira Cloud shared identity while keeping service-specific authorization scoped to Shiyan.
 
+### Mira Cloud shared identity (SHY-001 server slice)
+
+Cloud Shiyan verifies Mira Cloud service credentials without creating a second Shiyan account system. The canonical contract is owned by `uichat-mira/.github/docs/engineering/mira-cloud-auth.md` and `uichat-mira/cloud-auth/docs/service-credentials-v0.md`.
+
+Accepted credential:
+
+- `iss` is `mira:cloud-auth`.
+- `aud` is `mira:cloud-shiyan`; Relay transport credentials are rejected.
+- `scope` is exactly `["shiyan:authenticate"]`.
+- `sub` is the Mira Cloud Account and `device_id` is the Mira Device.
+- The header is `EdDSA`/`JWT` with a bounded `kid`; the payload must satisfy the strict canonical claim schema, including `iat <= nbf < exp` and a maximum 600-second lifetime.
+
+Verification is offline and fail-closed:
+
+- `CLOUD_AUTH_JWKS_URL` must be configured with the trusted Cloud Auth HTTPS JWKS address. It is deliberately not hardcoded in this repository.
+- Only keys from that address are trusted. A token cannot supply its own issuer, key URL, or key.
+- JWKS responses are validated strictly, cached for at most 300 seconds, and never followed through redirects. An expired cache is refreshed, and the request is rejected if the trusted JWKS cannot then be fetched. Unknown `kid`, unavailable JWKS, malformed keys, or missing configuration also reject the request; there is no fallback to the legacy credential after a Cloud verification failure.
+- Key rotation follows Cloud Auth's V0 pre-publication procedure: publish the new public key before activating it, allow at least the 300-second consumer cache window plus the maximum credential lifetime before retiring the old key, and fail closed on an unknown `kid`.
+- A `Bearer` credential with the compact-JWS shape (`x.y.z` of base64url segments) is always evaluated as a Mira Cloud credential. Opaque legacy device credentials must not use that shape.
+
+Current server boundary:
+
+- Valid Cloud verification produces an explicit `CloudShiyanPrincipal { cloudAccountId, cloudDeviceId }`. The Cloud Device id is not the existing D1 `devices.id`.
+- No Cloud-to-Shiyan D1 business-ownership mapping exists yet. A valid Cloud identity therefore receives `403 cloud_identity_unmapped` and cannot read legacy CaptureTask, Scene, or Destination resources.
+- The legacy opaque device credential remains on its existing isolated path and keeps existing business behavior and resource ownership.
+- Stable authentication errors are `401 device_unauthorized` (legacy path), `401 cloud_credential_unauthorized` (Cloud identity rejected), `403 cloud_identity_unmapped` (identity valid, Shiyan authorization not yet mapped), and `503 cloud_auth_unavailable` (trusted JWKS configuration/fetch failure). These are distinct from Shiyan business errors.
+
+Legacy removal condition: do not remove the legacy device credential until all of the following are true: the Cloud-to-Shiyan ownership mapping is implemented and reviewed, MOB-079 Mobile consumption passes T4 end-to-end, production T5 verification is accepted, and the existing migration/rollback window has closed. Until then, the legacy path is compatibility only and must not be treated as Mira Cloud identity.
+
+No Cloud Auth private key, token, or production key material is stored in this repository.
+
 ## Engineering flow
 
 Organization standard:

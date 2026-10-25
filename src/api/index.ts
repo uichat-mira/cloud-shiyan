@@ -10,6 +10,10 @@ import {
 import { handleMob020Request, runMob020Organize } from './mob020';
 import { handleMob022Request } from './mob022';
 import { createShiyanLlmService } from '../llm/index';
+import {
+  authenticateCloudShiyanCredential,
+  resolveShiyanRequestAuth,
+} from '../shared/cloudAuth';
 import { createPresignedR2PutUrl } from '../shared/r2Presign';
 import type { ShiyanLlmBinding } from '../shared/llm';
 import type { LlmEnvLike } from '../shared/llmGateway';
@@ -80,6 +84,7 @@ interface Env extends LlmEnvLike {
   R2_BUCKET_NAME: string;
   UPLOAD_TTL_SECONDS: string;
   DEVICE_AUTH_PEPPER: string;
+  CLOUD_AUTH_JWKS_URL?: string;
   GITHUB_DESTINATION_TOKEN: string;
   GITHUB_DESTINATION_OWNER?: string;
   GITHUB_DESTINATION_REPOSITORY?: string;
@@ -172,15 +177,10 @@ const sha256Hex = async (value: string): Promise<string> => {
     .join('');
 };
 
-async function authenticateDevice(
-  request: Request,
+async function lookupLegacyDeviceRow(
+  credential: string,
   env: Env,
 ): Promise<DeviceRow | null> {
-  const authorization = request.headers.get('authorization') ?? '';
-  const match = /^Bearer\s+(.+)$/i.exec(authorization);
-  const credential = match?.[1]?.trim();
-  if (!credential) return null;
-
   const hash = await sha256Hex(`${env.DEVICE_AUTH_PEPPER}:${credential}`);
   const device = await env.DB.prepare(
     `SELECT id, user_id FROM devices
@@ -638,10 +638,64 @@ export default {
       return json({ ok: true, data: { service: 'mira-shiyan' }, requestId });
     }
 
-    const device = await authenticateDevice(request, env);
-    if (!device) {
-      return errorResponse(requestId, 401, 'device_unauthorized', 'Valid Shiyan device credential required');
+    const auth = await resolveShiyanRequestAuth(request, {
+      authenticateCloud: (credential) =>
+        authenticateCloudShiyanCredential(credential, {
+          jwksUrl: env.CLOUD_AUTH_JWKS_URL,
+        }),
+      lookupLegacyDevice: async (credential) => {
+        const row = await lookupLegacyDeviceRow(credential, env);
+        return row
+          ? {
+              kind: 'legacy-device',
+              legacyDeviceId: row.id,
+              userId: row.user_id,
+            }
+          : null;
+      },
+    });
+
+    if (auth.kind === 'cloud-auth-unavailable') {
+      return errorResponse(
+        requestId,
+        503,
+        'cloud_auth_unavailable',
+        'Mira Cloud identity verification is unavailable',
+        true,
+      );
     }
+    if (auth.kind === 'cloud-credential-rejected') {
+      return errorResponse(
+        requestId,
+        401,
+        'cloud_credential_unauthorized',
+        'Valid Mira Cloud credential required',
+      );
+    }
+    if (auth.kind === 'cloud-shiyan') {
+      // Cloud Auth proves identity only. Until an explicit Cloud-to-Shiyan
+      // owner mapping exists, a Cloud principal must never enter legacy
+      // device-scoped business handlers.
+      return errorResponse(
+        requestId,
+        403,
+        'cloud_identity_unmapped',
+        'Mira Cloud identity is not mapped to a Shiyan principal',
+      );
+    }
+    if (auth.kind === 'missing' || auth.kind === 'legacy-invalid') {
+      return errorResponse(
+        requestId,
+        401,
+        'device_unauthorized',
+        'Valid Shiyan device credential required',
+      );
+    }
+
+    const device: DeviceRow = {
+      id: auth.principal.legacyDeviceId,
+      user_id: auth.principal.userId,
+    };
 
     if (request.method === 'POST' && url.pathname === '/v1/capture-tasks') {
       return createCaptureTask(request, env, device, requestId);
