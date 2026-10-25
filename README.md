@@ -120,7 +120,7 @@ Verification is offline and fail-closed:
 - Only keys from that address are trusted. A token cannot supply its own issuer, key URL, or key.
 - JWKS responses are validated strictly, cached for at most 300 seconds, and never followed through redirects. An expired cache is refreshed, and the request is rejected if the trusted JWKS cannot then be fetched. Unknown `kid`, unavailable JWKS, malformed keys, or missing configuration also reject the request; there is no fallback to the legacy credential after a Cloud verification failure.
 - Key rotation follows Cloud Auth's V0 pre-publication procedure: publish the new public key before activating it, allow at least the 300-second consumer cache window plus the maximum credential lifetime before retiring the old key, and fail closed on an unknown `kid`.
-- A `Bearer` credential with the compact-JWS shape (`x.y.z` of base64url segments) is always evaluated as a Mira Cloud credential. Opaque legacy device credentials must not use that shape.
+- A `Bearer` credential with exactly three dot-delimited segments is always evaluated as a Mira Cloud candidate, **even when its base64url is malformed**. Such malformed candidates fail closed rather than falling back to legacy lookup. Opaque legacy device credentials must not have exactly two dots.
 
 Current server boundary:
 
