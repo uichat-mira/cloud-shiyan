@@ -1,0 +1,18 @@
+# Package install output: never commit binaries or vendored dependencies.
+node_modules/
+
+# Wrangler-generated runtime output / local bindings.
+.wrangler/
+worker-configuration.d.ts
+.dev.vars
+.dev.vars.*
+
+# Build and test output.
+dist/
+coverage/
+*.log
+
+# Local secrets; checked-in examples are allowed.
+.env
+.env.*
+!.env.example
