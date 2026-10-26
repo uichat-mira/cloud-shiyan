@@ -114,26 +114,15 @@ const validShiyanToken = async (overrides: Record<string, unknown> = {}) =>
   );
 
 describe('Cloud Auth identity boundary', () => {
-  it('accepts a valid aud=shiyan credential as Cloud identity but denies unmapped Shiyan authorization', async () => {
-    const idempotencyKey = `cloud-unmapped-${crypto.randomUUID()}`;
-    const response = await worker.fetch(
-      new Request('https://shiyan.test/v1/capture-tasks', {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          authorization: `Bearer ${await validShiyanToken()}`,
-        },
-        body: JSON.stringify({
-          idempotencyKey,
-          title: 'Cloud identity must not create this task',
-          sceneId: 'meeting',
-          audio: { contentType: 'audio/mpeg', sizeBytes: 1 },
-        }),
-      }),
-    );
+  it('accepts a valid aud=shiyan credential only on the narrow account-owned capture routes', async () => {
+    const token = await validShiyanToken({
+      sub: `cloud-account-${crypto.randomUUID()}`,
+      device_id: `mira-device-${crypto.randomUUID()}`,
+    });
 
-    expect(response.status).toBe(403);
-    expect(await responseJson(response)).toMatchObject({
+    const scenesResponse = await worker.fetch(requestWith('/v1/scenes', token));
+    expect(scenesResponse.status).toBe(403);
+    expect(await responseJson(scenesResponse)).toMatchObject({
       ok: false,
       error: {
         code: 'cloud_identity_unmapped',
@@ -141,12 +130,34 @@ describe('Cloud Auth identity boundary', () => {
       },
     });
 
-    const created = await runtime.DB.prepare(
-      'SELECT id FROM capture_tasks WHERE create_idempotency_key = ?',
-    )
-      .bind(idempotencyKey)
-      .all<{ id: string }>();
-    expect(created.results ?? []).toHaveLength(0);
+    const taskId = crypto.randomUUID();
+    const confirmResponse = await worker.fetch(
+      new Request(
+        `https://shiyan.test/v1/capture-tasks/${taskId}/audio/confirm`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ assetId: 'asset-1', idempotencyKey: 'confirm-1' }),
+        },
+      ),
+    );
+    expect(confirmResponse.status).toBe(403);
+    expect(await responseJson(confirmResponse)).toMatchObject({
+      ok: false,
+      error: { code: 'cloud_identity_unmapped' },
+    });
+
+    const transcriptResponse = await worker.fetch(
+      requestWith(`/v1/capture-tasks/${taskId}/transcript`, token),
+    );
+    expect(transcriptResponse.status).toBe(403);
+    expect(await responseJson(transcriptResponse)).toMatchObject({
+      ok: false,
+      error: { code: 'cloud_identity_unmapped' },
+    });
   });
 
   it('rejects Relay audience, expired, and tampered credentials as identity failures', async () => {
@@ -219,17 +230,21 @@ describe('Cloud Auth identity boundary', () => {
     });
 
     // Even if the Cloud device id matches a legacy D1 device id, the Cloud
-    // principal must not inherit that legacy resource ownership.
+    // principal must not inherit that legacy resource ownership. The owned
+    // read route reports the same non-disclosing result as an unknown id.
     const cloudResponse = await worker.fetch(
       requestWith(
         `/v1/capture-tasks/${seeded.taskId}`,
-        await validShiyanToken({ device_id: seeded.deviceId }),
+        await validShiyanToken({
+          sub: `cloud-account-${crypto.randomUUID()}`,
+          device_id: seeded.deviceId,
+        }),
       ),
     );
-    expect(cloudResponse.status).toBe(403);
+    expect(cloudResponse.status).toBe(404);
     expect(await responseJson(cloudResponse)).toMatchObject({
       ok: false,
-      error: { code: 'cloud_identity_unmapped' },
+      error: { code: 'task_not_found' },
     });
 
     const stillLegacy = await worker.fetch(
