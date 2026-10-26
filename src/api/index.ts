@@ -15,6 +15,11 @@ import {
   resolveShiyanRequestAuth,
 } from '../shared/cloudAuth';
 import { createPresignedR2PutUrl } from '../shared/r2Presign';
+import {
+  captureTaskOwnerColumns,
+  findCaptureTaskIdByCreateIdempotencyKey,
+  type CaptureTaskOwner,
+} from '../shared/captureTaskOwner';
 import type { ShiyanLlmBinding } from '../shared/llm';
 import type { LlmEnvLike } from '../shared/llmGateway';
 import type {
@@ -401,15 +406,20 @@ async function createCaptureTask(
     return errorResponse(requestId, 400, 'invalid_request', 'Invalid CaptureTask request');
   }
 
-  const existing = await env.DB.prepare(
-    `SELECT id FROM capture_tasks
-     WHERE device_id = ? AND create_idempotency_key = ? LIMIT 1`,
-  )
-    .bind(device.id, input.idempotencyKey)
-    .first<{ id: string }>();
+  const owner: CaptureTaskOwner = {
+    kind: 'legacy-device',
+    legacyDeviceId: device.id,
+  };
+  const ownerColumns = captureTaskOwnerColumns(owner);
+
+  const existing = await findCaptureTaskIdByCreateIdempotencyKey(
+    env.DB,
+    owner,
+    input.idempotencyKey,
+  );
 
   if (existing) {
-    return canonicalCaptureTaskResponse(env, existing.id, requestId);
+    return canonicalCaptureTaskResponse(env, existing, requestId);
   }
 
   const now = new Date().toISOString();
@@ -422,10 +432,24 @@ async function createCaptureTask(
     await env.DB.batch([
       env.DB.prepare(
         `INSERT INTO capture_tasks
-         (id, device_id, user_id, title, scene_id, lifecycle_status, current_stage,
+         (id, owner_kind, device_id, cloud_account_id, cloud_device_id, user_id,
+          title, scene_id, lifecycle_status, current_stage,
           create_idempotency_key, correlation_id, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, 'active', 'upload', ?, ?, ?, ?)`,
-      ).bind(taskId, device.id, device.user_id, input.title, input.sceneId, input.idempotencyKey, requestId, now, now),
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', 'upload', ?, ?, ?, ?)`,
+      ).bind(
+        taskId,
+        ownerColumns.owner_kind,
+        ownerColumns.device_id,
+        ownerColumns.cloud_account_id,
+        ownerColumns.cloud_device_id,
+        device.user_id,
+        input.title,
+        input.sceneId,
+        input.idempotencyKey,
+        requestId,
+        now,
+        now,
+      ),
       env.DB.prepare(
         `INSERT INTO capture_stages
          (task_id, stage, status, retryable, retry_count, started_at, updated_at)
@@ -439,14 +463,13 @@ async function createCaptureTask(
       ).bind(assetId, taskId, objectKey, input.audio.contentType, input.audio.sizeBytes ?? null, expiresAt, now),
     ]);
   } catch {
-    const winner = await env.DB.prepare(
-      `SELECT id FROM capture_tasks
-       WHERE device_id = ? AND create_idempotency_key = ? LIMIT 1`,
-    )
-      .bind(device.id, input.idempotencyKey)
-      .first<{ id: string }>();
+    const winner = await findCaptureTaskIdByCreateIdempotencyKey(
+      env.DB,
+      owner,
+      input.idempotencyKey,
+    );
     if (winner) {
-      return canonicalCaptureTaskResponse(env, winner.id, requestId);
+      return canonicalCaptureTaskResponse(env, winner, requestId);
     }
     return errorResponse(
       requestId,

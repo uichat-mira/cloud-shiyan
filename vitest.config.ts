@@ -15,7 +15,7 @@ export default defineConfig({
       main: path.join(rootDir, 'src/api/index.ts'),
       miniflare: {
         compatibilityDate: '2026-08-29',
-        d1Databases: ['DB'],
+        d1Databases: ['DB', 'MIGRATION_DB'],
         r2Buckets: ['AUDIO'],
         serviceBindings: {
           AI: async () => new Response('Workers AI is not available in local T3 tests', { status: 501 }),
