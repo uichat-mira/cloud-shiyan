@@ -125,9 +125,11 @@ Verification is offline and fail-closed:
 Current server boundary:
 
 - Valid Cloud verification produces an explicit `CloudShiyanPrincipal { cloudAccountId, cloudDeviceId }`. The Cloud Device id is not the existing D1 `devices.id`.
-- No Cloud-to-Shiyan D1 business-ownership mapping exists yet. A valid Cloud identity therefore receives `403 cloud_identity_unmapped` and cannot read legacy CaptureTask, Scene, or Destination resources.
+- Only `POST /v1/capture-tasks` and `GET /v1/capture-tasks/:id` are open to a verified Cloud Account. Ownership is derived solely from the signed `sub`, so the account can create and read its own new tasks. A Cloud task persists `cloud_account_id` and `cloud_device_id` while D1 `device_id` stays `NULL`; the response `deviceId` is the display Cloud Device.
+- Account idempotency is scoped by `cloud_account_id + create_idempotency_key`, so distinct Cloud Devices of one account converge on the same task and separate accounts remain independent.
+- All other Cloud-authenticated Shiyan business operations still receive `403 cloud_identity_unmapped`, and foreign, unknown, or legacy task ids receive the same non-disclosing `404 task_not_found`. Cloud identity never inherits legacy device ownership.
 - The legacy opaque device credential remains on its existing isolated path and keeps existing business behavior and resource ownership.
-- Stable authentication errors are `401 device_unauthorized` (legacy path), `401 cloud_credential_unauthorized` (Cloud identity rejected), `403 cloud_identity_unmapped` (identity valid, Shiyan authorization not yet mapped), and `503 cloud_auth_unavailable` (trusted JWKS configuration/fetch failure). These are distinct from Shiyan business errors.
+- Stable authentication errors are `401 device_unauthorized` (legacy path), `401 cloud_credential_unauthorized` (Cloud identity rejected), `403 cloud_identity_unmapped` (identity valid, this Shiyan operation is not mapped yet), and `503 cloud_auth_unavailable` (trusted JWKS configuration/fetch failure). These are distinct from Shiyan business errors.
 
 Legacy removal condition: do not remove the legacy device credential until all of the following are true: the Cloud-to-Shiyan ownership mapping is implemented and reviewed, MOB-079 Mobile consumption passes T4 end-to-end, production T5 verification is accepted, and the existing migration/rollback window has closed. Until then, the legacy path is compatibility only and must not be treated as Mira Cloud identity.
 

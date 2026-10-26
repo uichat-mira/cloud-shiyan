@@ -17,6 +17,7 @@ import {
 import { createPresignedR2PutUrl } from '../shared/r2Presign';
 import {
   captureTaskOwnerColumns,
+  captureTaskOwnerScope,
   findCaptureTaskIdByCreateIdempotencyKey,
   type CaptureTaskOwner,
 } from '../shared/captureTaskOwner';
@@ -104,7 +105,10 @@ interface DeviceRow {
 
 interface TaskRow {
   id: string;
-  device_id: string;
+  owner_kind: string;
+  device_id: string | null;
+  cloud_account_id: string | null;
+  cloud_device_id: string | null;
   user_id: string | null;
   title: string;
   scene_id: string;
@@ -256,27 +260,31 @@ const parseCreateInput = (value: Record<string, unknown>): CreateCaptureTaskInpu
   };
 };
 
-async function readTask(env: Env, taskId: string): Promise<CaptureTaskView | null> {
-  const task = await env.DB.prepare(
-    `SELECT id, device_id, user_id, title, scene_id, lifecycle_status, current_stage,
-            created_at, updated_at
-     FROM capture_tasks WHERE id = ? LIMIT 1`,
-  )
-    .bind(taskId)
-    .first<TaskRow>();
-  if (!task) return null;
+const CAPTURE_TASK_SELECT = `SELECT id, owner_kind, device_id, cloud_account_id,
+         cloud_device_id, user_id, title, scene_id, lifecycle_status, current_stage,
+         created_at, updated_at
+  FROM capture_tasks`;
 
+async function captureTaskView(
+  env: Env,
+  task: TaskRow,
+): Promise<CaptureTaskView> {
   const stageRows = await env.DB.prepare(
     `SELECT stage, status, retryable, retry_count, error_code, error_message,
             started_at, finished_at, updated_at
      FROM capture_stages WHERE task_id = ? ORDER BY rowid ASC`,
   )
-    .bind(taskId)
+    .bind(task.id)
     .all<StageRow>();
 
   return {
     id: task.id,
-    deviceId: task.device_id,
+    // The Cloud Device is a display identity only. Legacy rows keep their
+    // device_id, while Cloud rows never persist it.
+    deviceId:
+      task.owner_kind === 'cloud-account'
+        ? (task.cloud_device_id ?? '')
+        : (task.device_id ?? ''),
     userId: task.user_id,
     title: task.title,
     sceneId: task.scene_id,
@@ -296,6 +304,31 @@ async function readTask(env: Env, taskId: string): Promise<CaptureTaskView | nul
       updatedAt: stage.updated_at,
     })),
   };
+}
+
+async function readTask(env: Env, taskId: string): Promise<CaptureTaskView | null> {
+  const task = await env.DB.prepare(
+    `${CAPTURE_TASK_SELECT}
+     WHERE id = ? AND owner_kind = 'legacy-device' LIMIT 1`,
+  )
+    .bind(taskId)
+    .first<TaskRow>();
+  return task ? captureTaskView(env, task) : null;
+}
+
+async function readOwnedTask(
+  env: Env,
+  owner: CaptureTaskOwner,
+  taskId: string,
+): Promise<CaptureTaskView | null> {
+  const scope = captureTaskOwnerScope(owner);
+  const task = await env.DB.prepare(
+    `${CAPTURE_TASK_SELECT}
+     WHERE id = ? AND ${scope.whereSql} LIMIT 1`,
+  )
+    .bind(taskId, ...scope.parameters)
+    .first<TaskRow>();
+  return task ? captureTaskView(env, task) : null;
 }
 
 async function readFirstAsset(env: Env, taskId: string): Promise<AssetRow | null> {
@@ -335,13 +368,26 @@ async function uploadGrant(env: Env, asset: AssetRow, now = new Date()): Promise
 
 async function canonicalCaptureTaskResponse(
   env: Env,
+  owner: CaptureTaskOwner,
   taskId: string,
   requestId: string,
   status = 200,
 ): Promise<Response> {
-  const task = await readTask(env, taskId);
+  // Ownership is checked before any task, stage, asset or presigned grant is
+  // read, so an idempotent reply can never expose another account's state.
+  const task = await readOwnedTask(env, owner, taskId);
+  if (!task) {
+    return errorResponse(
+      requestId,
+      500,
+      'canonical_state_missing',
+      'CaptureTask state is incomplete',
+      false,
+      taskId,
+    );
+  }
   const asset = await readFirstAsset(env, taskId);
-  if (!task || !asset) {
+  if (!asset) {
     return errorResponse(
       requestId,
       500,
@@ -397,7 +443,8 @@ async function markWorkflowStartFailed(env: Env, taskId: string): Promise<void> 
 async function createCaptureTask(
   request: Request,
   env: Env,
-  device: DeviceRow,
+  owner: CaptureTaskOwner,
+  userId: string | null,
   requestId: string,
 ): Promise<Response> {
   const raw = await safeJson(request);
@@ -406,10 +453,6 @@ async function createCaptureTask(
     return errorResponse(requestId, 400, 'invalid_request', 'Invalid CaptureTask request');
   }
 
-  const owner: CaptureTaskOwner = {
-    kind: 'legacy-device',
-    legacyDeviceId: device.id,
-  };
   const ownerColumns = captureTaskOwnerColumns(owner);
 
   const existing = await findCaptureTaskIdByCreateIdempotencyKey(
@@ -419,7 +462,7 @@ async function createCaptureTask(
   );
 
   if (existing) {
-    return canonicalCaptureTaskResponse(env, existing, requestId);
+    return canonicalCaptureTaskResponse(env, owner, existing, requestId);
   }
 
   const now = new Date().toISOString();
@@ -442,7 +485,7 @@ async function createCaptureTask(
         ownerColumns.device_id,
         ownerColumns.cloud_account_id,
         ownerColumns.cloud_device_id,
-        device.user_id,
+        userId,
         input.title,
         input.sceneId,
         input.idempotencyKey,
@@ -469,7 +512,7 @@ async function createCaptureTask(
       input.idempotencyKey,
     );
     if (winner) {
-      return canonicalCaptureTaskResponse(env, winner, requestId);
+      return canonicalCaptureTaskResponse(env, owner, winner, requestId);
     }
     return errorResponse(
       requestId,
@@ -480,17 +523,17 @@ async function createCaptureTask(
     );
   }
 
-  return canonicalCaptureTaskResponse(env, taskId, requestId, 201);
+  return canonicalCaptureTaskResponse(env, owner, taskId, requestId, 201);
 }
 
 async function getCaptureTask(
   env: Env,
-  device: DeviceRow,
+  owner: CaptureTaskOwner,
   taskId: string,
   requestId: string,
 ): Promise<Response> {
-  const task = await readTask(env, taskId);
-  if (!task || task.deviceId !== device.id) {
+  const task = await readOwnedTask(env, owner, taskId);
+  if (!task) {
     return errorResponse(requestId, 404, 'task_not_found', 'CaptureTask not found');
   }
   return json({ ok: true, data: { task }, requestId });
@@ -634,6 +677,45 @@ async function confirmAudio(
   return json({ ok: true, data: { task: await readTask(env, taskId) }, requestId });
 }
 
+/**
+ * The only Cloud-authenticated Shiyan business routes in this slice. The owner
+ * is derived exclusively from the verified Cloud Account `sub`; the Cloud
+ * Device is display metadata and every other route stays closed until SHY-003.
+ */
+async function handleCloudShiyanRequest(
+  request: Request,
+  env: Env,
+  url: URL,
+  principal: { cloudAccountId: string; cloudDeviceId: string },
+  requestId: string,
+): Promise<Response> {
+  const owner: CaptureTaskOwner = {
+    kind: 'cloud-account',
+    cloudAccountId: principal.cloudAccountId,
+    cloudDeviceId: principal.cloudDeviceId,
+  };
+
+  if (request.method === 'POST' && url.pathname === '/v1/capture-tasks') {
+    return createCaptureTask(request, env, owner, null, requestId);
+  }
+
+  const taskMatch = /^\/v1\/capture-tasks\/([^/]+)$/.exec(url.pathname);
+  if (request.method === 'GET' && taskMatch) {
+    const taskId = parseTaskIdPathParam(taskMatch[1]);
+    if (!taskId) {
+      return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
+    }
+    return getCaptureTask(env, owner, taskId, requestId);
+  }
+
+  return errorResponse(
+    requestId,
+    403,
+    'cloud_identity_unmapped',
+    'Mira Cloud identity is not mapped to this Shiyan operation',
+  );
+}
+
 export class ShiyanCaptureWorkflow extends WorkflowEntrypoint<Env, Mob019WorkflowPayload> {
   async run(
     event: { payload: Mob019WorkflowPayload },
@@ -696,15 +778,7 @@ export default {
       );
     }
     if (auth.kind === 'cloud-shiyan') {
-      // Cloud Auth proves identity only. Until an explicit Cloud-to-Shiyan
-      // owner mapping exists, a Cloud principal must never enter legacy
-      // device-scoped business handlers.
-      return errorResponse(
-        requestId,
-        403,
-        'cloud_identity_unmapped',
-        'Mira Cloud identity is not mapped to a Shiyan principal',
-      );
+      return handleCloudShiyanRequest(request, env, url, auth.principal, requestId);
     }
     if (auth.kind === 'missing' || auth.kind === 'legacy-invalid') {
       return errorResponse(
@@ -720,8 +794,13 @@ export default {
       user_id: auth.principal.userId,
     };
 
+    const legacyOwner: CaptureTaskOwner = {
+      kind: 'legacy-device',
+      legacyDeviceId: device.id,
+    };
+
     if (request.method === 'POST' && url.pathname === '/v1/capture-tasks') {
-      return createCaptureTask(request, env, device, requestId);
+      return createCaptureTask(request, env, legacyOwner, device.user_id, requestId);
     }
 
     const taskMatch = /^\/v1\/capture-tasks\/([^/]+)$/.exec(url.pathname);
@@ -730,7 +809,7 @@ export default {
       if (!taskId) {
         return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
       }
-      return getCaptureTask(env, device, taskId, requestId);
+      return getCaptureTask(env, legacyOwner, taskId, requestId);
     }
 
     const confirmMatch = /^\/v1\/capture-tasks\/([^/]+)\/audio\/confirm$/.exec(url.pathname);
