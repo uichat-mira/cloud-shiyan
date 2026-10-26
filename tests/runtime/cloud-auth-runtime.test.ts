@@ -61,9 +61,10 @@ const seedLegacyDevice = async (
 
   await runtime.DB.prepare(
     `INSERT INTO capture_tasks
-     (id, device_id, user_id, title, scene_id, lifecycle_status, current_stage,
+     (id, owner_kind, device_id, cloud_account_id, cloud_device_id, user_id,
+      title, scene_id, lifecycle_status, current_stage,
       create_idempotency_key, correlation_id, created_at, updated_at)
-     VALUES (?, ?, NULL, ?, ?, 'active', 'upload', ?, ?, ?, ?)`,
+     VALUES (?, 'legacy-device', ?, NULL, NULL, NULL, ?, ?, 'active', 'upload', ?, ?, ?, ?)`,
   )
     .bind(
       taskId,
