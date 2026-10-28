@@ -1,3 +1,7 @@
+import {
+  captureTaskOwnerScope,
+  type CaptureTaskOwner,
+} from '../shared/captureTaskOwner';
 import type { SttFailure, SttSuccess, TranscriptSegment } from '../shared/stt';
 import { executeSttStage } from '../shared/sttStage';
 import { WorkersAiSttProvider, type WorkersAiLike } from '../shared/workersAiStt';
@@ -543,6 +547,40 @@ async function setAudioRetention(
     },
     requestId,
   });
+}
+
+export async function handleAudioRetentionRequest(
+  request: Request,
+  env: Mob019Env,
+  owner: CaptureTaskOwner,
+  requestId: string,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const retentionMatch = /^\/v1\/capture-tasks\/([^/]+)\/audio\/retention$/.exec(url.pathname);
+  if (!retentionMatch) return null;
+
+  const taskId = parseTaskId(retentionMatch[1]);
+  if (!taskId) {
+    return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
+  }
+  if (request.method !== 'PUT') {
+    return errorResponse(requestId, 405, 'method_not_allowed', 'Method not allowed', false, taskId);
+  }
+
+  // Owner scope is resolved against capture_tasks before the asset row or
+  // retention state is read, so a foreign, unknown or legacy task is
+  // indistinguishable from a task that does not exist.
+  const scope = captureTaskOwnerScope(owner);
+  const task = await env.DB.prepare(
+    `SELECT id FROM capture_tasks WHERE id = ? AND ${scope.whereSql} LIMIT 1`,
+  )
+    .bind(taskId, ...scope.parameters)
+    .first<{ id: string }>();
+  if (!task) {
+    return errorResponse(requestId, 404, 'task_not_found', 'CaptureTask not found');
+  }
+
+  return setAudioRetention(request, env, taskId, requestId);
 }
 
 async function workflowExists(env: Mob019Env, workflowId: string): Promise<boolean> {

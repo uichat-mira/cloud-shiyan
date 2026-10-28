@@ -2,6 +2,7 @@ import { WorkflowEntrypoint } from 'cloudflare:workers';
 import {
   cleanupExpiredAudio,
   ensureDefaultAudioRetention,
+  handleAudioRetentionRequest,
   handleMob019Request,
   runMob019Workflow,
   type Mob019WorkflowPayload,
@@ -306,16 +307,6 @@ async function captureTaskView(
   };
 }
 
-async function readTask(env: Env, taskId: string): Promise<CaptureTaskView | null> {
-  const task = await env.DB.prepare(
-    `${CAPTURE_TASK_SELECT}
-     WHERE id = ? AND owner_kind = 'legacy-device' LIMIT 1`,
-  )
-    .bind(taskId)
-    .first<TaskRow>();
-  return task ? captureTaskView(env, task) : null;
-}
-
 async function readOwnedTask(
   env: Env,
   owner: CaptureTaskOwner,
@@ -542,12 +533,15 @@ async function getCaptureTask(
 async function confirmAudio(
   request: Request,
   env: Env,
-  device: DeviceRow,
+  owner: CaptureTaskOwner,
   taskId: string,
   requestId: string,
 ): Promise<Response> {
-  const task = await readTask(env, taskId);
-  if (!task || task.deviceId !== device.id) {
+  // The typed owner scope is applied before the asset lookup, R2 head or any
+  // task mutation so another account, device or legacy owner sees the same
+  // non-disclosing task_not_found.
+  const task = await readOwnedTask(env, owner, taskId);
+  if (!task) {
     return errorResponse(requestId, 404, 'task_not_found', 'CaptureTask not found');
   }
 
@@ -576,7 +570,7 @@ async function confirmAudio(
 
     await ensureDefaultAudioRetention(env, asset.id);
 
-    const latestTask = await readTask(env, taskId);
+    const latestTask = await readOwnedTask(env, owner, taskId);
     const verifyStage = latestTask?.stages.find((stage) => stage.stage === 'verify-audio');
     if (!latestTask || !verifyStage) {
       return errorResponse(
@@ -622,7 +616,7 @@ async function confirmAudio(
       }
     }
 
-    return json({ ok: true, data: { task: await readTask(env, taskId) }, requestId });
+    return json({ ok: true, data: { task: await readOwnedTask(env, owner, taskId) }, requestId });
   }
 
   const object = await env.AUDIO.head(asset.object_key);
@@ -674,7 +668,7 @@ async function confirmAudio(
     return errorResponse(requestId, 503, 'workflow_start_failed', 'Audio is confirmed but processing could not start yet', true, taskId);
   }
 
-  return json({ ok: true, data: { task: await readTask(env, taskId) }, requestId });
+  return json({ ok: true, data: { task: await readOwnedTask(env, owner, taskId) }, requestId });
 }
 
 /**
@@ -707,6 +701,23 @@ async function handleCloudShiyanRequest(
     }
     return getCaptureTask(env, owner, taskId, requestId);
   }
+
+  const confirmMatch = /^\/v1\/capture-tasks\/([^/]+)\/audio\/confirm$/.exec(url.pathname);
+  if (request.method === 'POST' && confirmMatch) {
+    const taskId = parseTaskIdPathParam(confirmMatch[1]);
+    if (!taskId) {
+      return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
+    }
+    return confirmAudio(request, env, owner, taskId, requestId);
+  }
+
+  const retentionResponse = await handleAudioRetentionRequest(
+    request,
+    env,
+    owner,
+    requestId,
+  );
+  if (retentionResponse) return retentionResponse;
 
   return errorResponse(
     requestId,
@@ -818,7 +829,7 @@ export default {
       if (!taskId) {
         return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
       }
-      return confirmAudio(request, env, device, taskId, requestId);
+      return confirmAudio(request, env, legacyOwner, taskId, requestId);
     }
 
     const mob019Response = await handleMob019Request(request, env, device, requestId);

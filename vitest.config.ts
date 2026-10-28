@@ -17,6 +17,12 @@ export default defineConfig({
         compatibilityDate: '2026-08-29',
         d1Databases: ['DB', 'MIGRATION_DB'],
         r2Buckets: ['AUDIO'],
+        workflows: {
+          CAPTURE_WORKFLOW: {
+            name: 'mira-shiyan-capture',
+            className: 'ShiyanCaptureWorkflow',
+          },
+        },
         serviceBindings: {
           AI: async () => new Response('Workers AI is not available in local T3 tests', { status: 501 }),
         },

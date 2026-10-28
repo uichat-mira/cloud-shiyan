@@ -144,10 +144,49 @@ describe('Cloud Auth identity boundary', () => {
         },
       ),
     );
-    expect(confirmResponse.status).toBe(403);
+    expect(confirmResponse.status).toBe(404);
     expect(await responseJson(confirmResponse)).toMatchObject({
       ok: false,
-      error: { code: 'cloud_identity_unmapped' },
+      error: { code: 'task_not_found' },
+    });
+
+    const retentionResponse = await worker.fetch(
+      new Request(
+        `https://shiyan.test/v1/capture-tasks/${taskId}/audio/retention`,
+        {
+          method: 'PUT',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ retained: true }),
+        },
+      ),
+    );
+    expect(retentionResponse.status).toBe(404);
+    expect(await responseJson(retentionResponse)).toMatchObject({
+      ok: false,
+      error: { code: 'task_not_found' },
+    });
+
+    const legacy = await seedLegacyDevice('legacy-cloud-boundary');
+    const legacyConfirm = await worker.fetch(
+      new Request(
+        `https://shiyan.test/v1/capture-tasks/${legacy.taskId}/audio/confirm`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({ assetId: 'asset-1', idempotencyKey: 'confirm-2' }),
+        },
+      ),
+    );
+    expect(legacyConfirm.status).toBe(404);
+    expect(await responseJson(legacyConfirm)).toMatchObject({
+      ok: false,
+      error: { code: 'task_not_found' },
     });
 
     const transcriptResponse = await worker.fetch(
