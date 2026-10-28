@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { env, exports } from 'cloudflare:workers';
+import { cleanupExpiredAudio, runMob019Workflow, type Mob019Env } from '../../src/api/mob019';
 import {
   createTestSigningKey,
   shiyanClaims,
@@ -846,8 +847,6 @@ describe('Cloud-owned audio confirmation and retention', () => {
       `mira-device-${crypto.randomUUID()}`,
     );
     const closedRoutes: Array<{ method: string; path: string }> = [
-      { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/transcript` },
-      { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/stt/retry` },
       { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/scenes` },
       { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/destination` },
     ];
@@ -864,5 +863,184 @@ describe('Cloud-owned audio confirmation and retention', () => {
         error: { code: 'cloud_identity_unmapped' },
       });
     }
+    for (const route of [
+      { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/transcript` },
+      { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/stt/retry` },
+    ]) {
+      const response = await worker.fetch(new Request(`https://shiyan.test${route.path}`, {
+        method: route.method,
+        headers: { authorization: `Bearer ${cloudToken}` },
+      }));
+      expect(response.status).toBe(404);
+      expect(await responseJson(response)).toMatchObject({ error: { code: 'task_not_found' } });
+    }
+  });
+});
+
+describe.sequential('Cloud-owned Transcript, STT retries and trusted Worker binding', () => {
+  const confirmedTask = async (token: string): Promise<CreatedCaptureTask> => {
+    const task = await createOwnedTask(token);
+    await uploadAudio(task.objectKey);
+    await runtime.DB.prepare(
+      `UPDATE audio_assets SET status = 'confirmed', actual_size_bytes = 32,
+         confirmed_at = ? WHERE id = ? AND task_id = ?`,
+    )
+      .bind(new Date().toISOString(), task.assetId, task.taskId)
+      .run();
+    return task;
+  };
+
+  it('persists a Transcript through trusted D1/R2 processing, isolates reads, and preserves it on cleanup', async () => {
+    const accountA = `cloud-account-${crypto.randomUUID()}`;
+    const tokenA = await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`);
+    const tokenB = await tokenFor(`cloud-account-${crypto.randomUUID()}`, `mira-device-${crypto.randomUUID()}`);
+    const task = await confirmedTask(tokenA);
+    let aiCalls = 0;
+    const service = {
+      DB: runtime.DB,
+      AUDIO: runtime.AUDIO,
+      CAPTURE_WORKFLOW: runtime.CAPTURE_WORKFLOW,
+      AI: {
+        async run() {
+          aiCalls += 1;
+          return {
+            text: 'Owned transcript evidence',
+            language: 'en',
+            segments: [{ start: 0, end: 1, text: 'Owned transcript evidence' }],
+          };
+        },
+      },
+    } as unknown as Mob019Env;
+
+    // Trust comes from the server-only Workflow binding. No user JWT is
+    // injected into this internal verify -> transcribe -> persist path.
+    const step = { async do<T>(_name: string, callback: () => Promise<T>): Promise<T> { return callback(); } };
+    const outcome = await runMob019Workflow(
+      service,
+      { taskId: task.taskId, objectKey: task.objectKey },
+      step,
+    );
+    expect(outcome.ok).toBe(true);
+    expect(aiCalls).toBe(1);
+    const saved = await runtime.DB.prepare(
+      'SELECT task_id, source_asset_id, text, stt_artifact_key FROM transcripts WHERE task_id = ?',
+    )
+      .bind(task.taskId)
+      .first<{ task_id: string; source_asset_id: string; text: string; stt_artifact_key: string }>();
+    expect(saved).toMatchObject({
+      task_id: task.taskId,
+      source_asset_id: task.assetId,
+      text: 'Owned transcript evidence',
+    });
+    expect(await runtime.AUDIO.head(saved!.stt_artifact_key)).not.toBeNull();
+
+    const readA = await worker.fetch(requestWith(`/v1/capture-tasks/${task.taskId}/transcript`, tokenA));
+    expect(readA.status).toBe(200);
+    expect(await responseJson(readA)).toMatchObject({
+      ok: true,
+      data: { transcript: { taskId: task.taskId, sourceAssetId: task.assetId, text: 'Owned transcript evidence' } },
+    });
+    const readB = await worker.fetch(requestWith(`/v1/capture-tasks/${task.taskId}/transcript`, tokenB));
+    expect(readB.status).toBe(404);
+    expect(await responseJson(readB)).toMatchObject({ error: { code: 'task_not_found' } });
+    const nonexistent = await worker.fetch(requestWith(`/v1/capture-tasks/${crypto.randomUUID()}/transcript`, tokenA));
+    expect(nonexistent.status).toBe(404);
+    expect(await responseJson(nonexistent)).toMatchObject({ error: { code: 'task_not_found' } });
+
+    const legacyCredential = `legacy-transcript-${crypto.randomUUID()}`;
+    await seedLegacyDevice(legacyCredential);
+    const legacyRead = await worker.fetch(requestWith(`/v1/capture-tasks/${task.taskId}/transcript`, legacyCredential));
+    expect(legacyRead.status).toBe(404);
+    const wrongAudience = await worker.fetch(requestWith(
+      `/v1/capture-tasks/${task.taskId}/transcript`,
+      await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`, { aud: 'mira:cloud-relay-transport' }),
+    ));
+    expect(wrongAudience.status).toBe(401);
+
+    // Retention cleanup removes expired raw R2, not the owned Transcript.
+    await runtime.DB.prepare('UPDATE audio_assets SET delete_after = ? WHERE id = ?')
+      .bind('2020-01-01T00:00:00.000Z', task.assetId)
+      .run();
+    const deleted = await cleanupExpiredAudio(service);
+    expect(deleted.deleted).toBeGreaterThanOrEqual(1);
+    expect(await runtime.AUDIO.head(task.objectKey)).toBeNull();
+    const stillReadable = await worker.fetch(requestWith(`/v1/capture-tasks/${task.taskId}/transcript`, tokenA));
+    expect(stillReadable.status).toBe(200);
+  });
+
+  it('rejects a forged internal task/object pair without modifying another task', async () => {
+    const accountA = `cloud-account-${crypto.randomUUID()}`;
+    const a = await confirmedTask(await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`));
+    const b = await confirmedTask(await tokenFor(`cloud-account-${crypto.randomUUID()}`, `mira-device-${crypto.randomUUID()}`));
+    let aiCalls = 0;
+    const service = {
+      DB: runtime.DB, AUDIO: runtime.AUDIO, CAPTURE_WORKFLOW: runtime.CAPTURE_WORKFLOW,
+      AI: { async run() { aiCalls++; return { text: 'must-not-run' }; } },
+    } as unknown as Mob019Env;
+    const outcome = await runMob019Workflow(
+      service,
+      { taskId: a.taskId, objectKey: b.objectKey },
+      { async do<T>(_name: string, callback: () => Promise<T>): Promise<T> { return callback(); } },
+    );
+    expect(outcome.ok).toBe(false);
+    expect(aiCalls).toBe(0);
+    const stage = await runtime.DB.prepare(
+      `SELECT COUNT(*) AS count FROM capture_stages
+       WHERE task_id = ? AND stage IN ('verify-audio', 'transcribe', 'persist-transcript')`,
+    ).bind(a.taskId).first<{ count: number }>();
+    expect(stage?.count).toBe(0);
+    const transcript = await runtime.DB.prepare('SELECT id FROM transcripts WHERE task_id = ?')
+      .bind(a.taskId).first();
+    expect(transcript).toBeNull();
+    expect(await runtime.AUDIO.head(b.objectKey)).not.toBeNull();
+  });
+
+  it('allows only account-owned eligible STT retries and preserves guarded routes', async () => {
+    const accountA = `cloud-account-${crypto.randomUUID()}`;
+    const tokenA = await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`);
+    const tokenB = await tokenFor(`cloud-account-${crypto.randomUUID()}`, `mira-device-${crypto.randomUUID()}`);
+    const task = await confirmedTask(tokenA);
+    const now = new Date().toISOString();
+    await runtime.DB.prepare(
+      `INSERT INTO capture_stages
+       (task_id, stage, status, retryable, retry_count, error_code, updated_at)
+       VALUES (?, 'transcribe', 'failed', 1, 0, 'stt_provider_retryable', ?)`,
+    ).bind(task.taskId, now).run();
+
+    const retryPath = `/v1/capture-tasks/${task.taskId}/stt/retry`;
+    const foreign = await worker.fetch(new Request(`https://shiyan.test${retryPath}`, {
+      method: 'POST', headers: { authorization: `Bearer ${tokenB}` },
+    }));
+    expect(foreign.status).toBe(404);
+    expect(await responseJson(foreign)).toMatchObject({ error: { code: 'task_not_found' } });
+    const before = await runtime.DB.prepare(
+      `SELECT status, retry_count FROM capture_stages WHERE task_id = ? AND stage = 'transcribe'`,
+    ).bind(task.taskId).first<{ status: string; retry_count: number }>();
+    expect(before).toEqual({ status: 'failed', retry_count: 0 });
+
+    const premature = await worker.fetch(requestWith(`/v1/capture-tasks/${task.taskId}/transcript`, tokenA));
+    expect(premature.status).toBe(404);
+    expect(await responseJson(premature)).toMatchObject({ error: { code: 'transcript_not_ready' } });
+    const wrongScope = await worker.fetch(new Request(`https://shiyan.test${retryPath}`, {
+      method: 'POST',
+      headers: { authorization: `Bearer ${await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`, { scope: ['relay:transport'] })}` },
+    }));
+    expect(wrongScope.status).toBe(401);
+    const forgedPublic = await worker.fetch(new Request(
+      `https://shiyan.test/v1/capture-tasks/${task.taskId}/workflow/run`,
+      { method: 'POST', headers: { authorization: `Bearer ${tokenA}` }, body: JSON.stringify({ objectKey: task.objectKey }) },
+    ));
+    expect(forgedPublic.status).toBe(403);
+    expect(await responseJson(forgedPublic)).toMatchObject({ error: { code: 'cloud_identity_unmapped' } });
+
+    const permitted = await worker.fetch(new Request(`https://shiyan.test${retryPath}`, {
+      method: 'POST', headers: { authorization: `Bearer ${tokenA}` },
+    }));
+    expect(permitted.status).toBe(200);
+    expect(await responseJson(permitted)).toMatchObject({
+      ok: true,
+      data: { taskId: task.taskId, stage: 'transcribe', retryCount: 1 },
+    });
+    expect(await runtime.CAPTURE_WORKFLOW.get(`capture-${task.taskId}-stt-1`)).toBeTruthy();
   });
 });

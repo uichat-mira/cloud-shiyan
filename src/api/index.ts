@@ -3,6 +3,7 @@ import {
   cleanupExpiredAudio,
   ensureDefaultAudioRetention,
   handleAudioRetentionRequest,
+  handleCloudAudioProcessingRequest,
   handleMob019Request,
   runMob019Workflow,
   type Mob019WorkflowPayload,
@@ -718,6 +719,14 @@ async function handleCloudShiyanRequest(
     requestId,
   );
   if (retentionResponse) return retentionResponse;
+
+  const processingResponse = await handleCloudAudioProcessingRequest(
+    request,
+    env,
+    owner,
+    requestId,
+  );
+  if (processingResponse) return processingResponse;
 
   return errorResponse(
     requestId,

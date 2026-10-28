@@ -415,6 +415,27 @@ test('Non-retryable provider input error does not loop inside the Workflow', asy
   assert.equal(db.stage.error_code, 'stt_provider_error');
 });
 
+test('STT retry records terminal failure when confirmed audio is deleted before Workflow execution', async () => {
+  const { env, db, getAiCalls, r2 } = makeEnv();
+  const asset = db.assets.get(TASK_ID);
+  assert.ok(asset);
+  asset.deleted_at = '2026-08-29T03:00:00.000Z';
+  db.stage = { status: 'pending', retryable: 1, retry_count: 1, error_code: null };
+
+  const result = await runMob019Workflow(
+    env,
+    { taskId: TASK_ID, objectKey: asset.object_key, startStage: 'transcribe' },
+    { async do<T>(_name: string, callback: () => Promise<T>) { return callback(); } },
+  );
+
+  assert.deepEqual(result, { ok: false });
+  assert.equal(db.stage.status, 'failed', 'a retry must not remain pending forever');
+  assert.equal(db.stage.retryable, 0);
+  assert.equal(db.stage.error_code, 'audio_asset_deleted');
+  assert.equal(getAiCalls(), 0);
+  assert.equal(r2.headCalls, 0, 'deleted metadata must be checked before R2');
+  assert.equal(db.transcript, null);
+});
 test('Repeated STT retries reuse the same CaptureTask and AudioAsset while incrementing retry count', async () => {
   const { env, db, workflowIds } = makeEnv();
 
