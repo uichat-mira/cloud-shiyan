@@ -192,10 +192,22 @@ describe('Cloud Auth identity boundary', () => {
     const transcriptResponse = await worker.fetch(
       requestWith(`/v1/capture-tasks/${taskId}/transcript`, token),
     );
-    expect(transcriptResponse.status).toBe(403);
+    expect(transcriptResponse.status).toBe(404);
     expect(await responseJson(transcriptResponse)).toMatchObject({
       ok: false,
-      error: { code: 'cloud_identity_unmapped' },
+      error: { code: 'task_not_found' },
+    });
+
+    const retryResponse = await worker.fetch(
+      new Request(`https://shiyan.test/v1/capture-tasks/${taskId}/stt/retry`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${token}` },
+      }),
+    );
+    expect(retryResponse.status).toBe(404);
+    expect(await responseJson(retryResponse)).toMatchObject({
+      ok: false,
+      error: { code: 'task_not_found' },
     });
   });
 
