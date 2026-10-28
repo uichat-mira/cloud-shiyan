@@ -905,7 +905,7 @@ export async function runMob019Workflow(
   // The Workflow is a trusted Worker binding, not an HTTP identity. Reject a
   // mismatched task/objectKey payload before ANY stage mutation or R2 access.
   const linkedAsset = await readAsset(env, payload.taskId, payload.objectKey);
-  if (!linkedAsset || linkedAsset.status !== 'confirmed' || linkedAsset.deleted_at) {
+  if (!linkedAsset) {
     return { ok: false };
   }
 
