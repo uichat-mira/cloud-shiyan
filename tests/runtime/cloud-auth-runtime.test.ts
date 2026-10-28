@@ -114,19 +114,22 @@ const validShiyanToken = async (overrides: Record<string, unknown> = {}) =>
   );
 
 describe('Cloud Auth identity boundary', () => {
-  it('accepts a valid aud=shiyan credential only on the narrow account-owned capture routes', async () => {
+  it('accepts a valid aud=shiyan credential only on the narrow account-owned capture and scene routes', async () => {
     const token = await validShiyanToken({
       sub: `cloud-account-${crypto.randomUUID()}`,
       device_id: `mira-device-${crypto.randomUUID()}`,
     });
 
     const scenesResponse = await worker.fetch(requestWith('/v1/scenes', token));
-    expect(scenesResponse.status).toBe(403);
+    expect(scenesResponse.status).toBe(200);
     expect(await responseJson(scenesResponse)).toMatchObject({
-      ok: false,
-      error: {
-        code: 'cloud_identity_unmapped',
-        retryable: false,
+      ok: true,
+      data: {
+        scenes: [
+          { id: 'meeting', builtIn: true },
+          { id: 'quick-note', builtIn: true },
+          { id: 'reflection', builtIn: true },
+        ],
       },
     });
 

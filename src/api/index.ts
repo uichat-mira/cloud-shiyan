@@ -9,7 +9,11 @@ import {
   type Mob019WorkflowPayload,
   type Mob019WorkflowStep,
 } from './mob019';
-import { handleMob020Request, runMob020Organize } from './mob020';
+import {
+  handleMob020Request,
+  handleMob020SceneRequest,
+  runMob020Organize,
+} from './mob020';
 import { handleMob022Request } from './mob022';
 import { createShiyanLlmService } from '../llm/index';
 import {
@@ -711,6 +715,14 @@ async function handleCloudShiyanRequest(
     }
     return confirmAudio(request, env, owner, taskId, requestId);
   }
+
+  const sceneResponse = await handleMob020SceneRequest(
+    request,
+    withLlm(env),
+    owner,
+    requestId,
+  );
+  if (sceneResponse) return sceneResponse;
 
   const retentionResponse = await handleAudioRetentionRequest(
     request,

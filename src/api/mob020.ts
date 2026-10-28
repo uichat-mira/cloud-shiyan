@@ -15,6 +15,10 @@ import {
   validateSceneSpec,
 } from '../shared/scenes';
 import { resolveOwnedScene } from '../shared/sceneOwner';
+import {
+  assertCaptureTaskOwner,
+  type CaptureTaskOwner,
+} from '../shared/captureTaskOwner';
 
 export interface Mob019WorkflowBinding {
   create(input?: { id?: string; params?: Record<string, unknown> }): Promise<unknown>;
@@ -1118,11 +1122,81 @@ const scenesMatch = (
   }
 };
 
+type SceneStore = {
+  readonly ownerId: string;
+  readonly lookupSql: string;
+  readonly listSql: string;
+  readonly insertSql: string;
+  readonly insertValues: (
+    scene: SceneSpec,
+    legacyUserId: string | null,
+    now: string,
+  ) => (string | null)[];
+};
+
+/**
+ * Cloud custom Scenes are stored by verified Cloud Account sub, never by the
+ * signed Cloud Device or any caller-supplied identity. Legacy rows keep their
+ * original scenes(device_id, id) storage.
+ */
+const sceneStoreFor = (
+  owner: CaptureTaskOwner,
+  legacyUserId: string | null,
+): SceneStore => {
+  assertCaptureTaskOwner(owner);
+
+  if (owner.kind === 'cloud-account') {
+    return {
+      ownerId: owner.cloudAccountId,
+      lookupSql:
+        'SELECT id, name, instruction, sections_json FROM cloud_scenes WHERE cloud_account_id = ? AND id = ? LIMIT 1',
+      listSql:
+        'SELECT id, name, instruction, sections_json FROM cloud_scenes WHERE cloud_account_id = ? ORDER BY created_at ASC',
+      insertSql:
+        `INSERT INTO cloud_scenes
+         (cloud_account_id, id, name, instruction, sections_json, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      insertValues: (scene, _legacyUserId, now) => [
+        owner.cloudAccountId,
+        scene.id,
+        scene.name,
+        scene.instruction,
+        JSON.stringify(scene.sections),
+        now,
+        now,
+      ],
+    };
+  }
+
+  return {
+    ownerId: owner.legacyDeviceId,
+    lookupSql:
+      'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? AND id = ? LIMIT 1',
+    listSql:
+      'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? ORDER BY created_at ASC',
+    insertSql:
+      `INSERT INTO scenes
+       (id, device_id, user_id, name, instruction, sections_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    insertValues: (scene, userId, now) => [
+      scene.id,
+      owner.legacyDeviceId,
+      userId,
+      scene.name,
+      scene.instruction,
+      JSON.stringify(scene.sections),
+      now,
+      now,
+    ],
+  };
+};
+
 async function createScene(
   request: Request,
   env: Mob020Env,
-  device: { id: string; user_id?: string | null },
+  owner: CaptureTaskOwner,
   requestId: string,
+  legacyUserId: string | null = null,
 ): Promise<Response> {
   const raw = await safeJson(request);
   if (!raw || typeof raw.id !== 'string') {
@@ -1161,11 +1235,10 @@ async function createScene(
     );
   }
   const scene = validated.value;
+  const store = sceneStoreFor(owner, legacyUserId);
 
-  const existing = await env.DB.prepare(
-    'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? AND id = ? LIMIT 1',
-  )
-    .bind(device.id, sceneId)
+  const existing = await env.DB.prepare(store.lookupSql)
+    .bind(store.ownerId, sceneId)
     .first<SceneRow>();
   if (existing) {
     if (scenesMatch(existing, scene)) {
@@ -1185,27 +1258,12 @@ async function createScene(
 
   const now = new Date().toISOString();
   try {
-    await env.DB.prepare(
-      `INSERT INTO scenes
-       (id, device_id, user_id, name, instruction, sections_json, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-    )
-      .bind(
-        sceneId,
-        device.id,
-        device.user_id ?? null,
-        scene.name,
-        scene.instruction,
-        JSON.stringify(scene.sections),
-        now,
-        now,
-      )
+    await env.DB.prepare(store.insertSql)
+      .bind(...store.insertValues(scene, legacyUserId, now))
       .run();
   } catch {
-    const winner = await env.DB.prepare(
-      'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? AND id = ? LIMIT 1',
-    )
-      .bind(device.id, sceneId)
+    const winner = await env.DB.prepare(store.lookupSql)
+      .bind(store.ownerId, sceneId)
       .first<SceneRow>();
     if (winner && scenesMatch(winner, scene)) {
       return response({
@@ -1230,13 +1288,12 @@ async function createScene(
 
 async function listScenes(
   env: Mob020Env,
-  device: { id: string },
+  owner: CaptureTaskOwner,
   requestId: string,
 ): Promise<Response> {
-  const rows = await env.DB.prepare(
-    'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? ORDER BY created_at ASC',
-  )
-    .bind(device.id)
+  const store = sceneStoreFor(owner, null);
+  const rows = await env.DB.prepare(store.listSql)
+    .bind(store.ownerId)
     .all<SceneRow>();
 
   const scenes: SceneView[] = BUILT_IN_SCENES.map((scene) =>
@@ -1261,6 +1318,30 @@ async function listScenes(
   return response({ ok: true, data: { scenes }, requestId });
 }
 
+/**
+ * Scene create/list for an already authenticated owner. SHY-013 admits this
+ * limited route for Cloud Accounts; the legacy device path reuses the same
+ * handler against the historical scenes table.
+ */
+export async function handleMob020SceneRequest(
+  request: Request,
+  env: Mob020Env,
+  owner: CaptureTaskOwner,
+  requestId: string,
+  legacyUserId: string | null = null,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  if (url.pathname !== '/v1/scenes') return null;
+
+  if (request.method === 'POST') {
+    return createScene(request, env, owner, requestId, legacyUserId);
+  }
+  if (request.method === 'GET') {
+    return listScenes(env, owner, requestId);
+  }
+  return null;
+}
+
 export async function handleMob020Request(
   request: Request,
   env: Mob020Env,
@@ -1269,12 +1350,14 @@ export async function handleMob020Request(
 ): Promise<Response | null> {
   const url = new URL(request.url);
 
-  if (request.method === 'POST' && url.pathname === '/v1/scenes') {
-    return createScene(request, env, device, requestId);
-  }
-  if (request.method === 'GET' && url.pathname === '/v1/scenes') {
-    return listScenes(env, device, requestId);
-  }
+  const sceneResponse = await handleMob020SceneRequest(
+    request,
+    env,
+    { kind: 'legacy-device', legacyDeviceId: device.id },
+    requestId,
+    device.user_id ?? null,
+  );
+  if (sceneResponse) return sceneResponse;
 
   const aiDraftMatch = /^\/v1\/capture-tasks\/([^/]+)\/ai-draft$/.exec(url.pathname);
   const adjustMatch = /^\/v1\/capture-tasks\/([^/]+)\/ai-draft\/adjust$/.exec(
