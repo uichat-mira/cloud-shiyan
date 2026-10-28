@@ -192,19 +192,19 @@ const arrayBufferToBase64 = (buffer: ArrayBuffer): string => {
   return btoa(binary);
 };
 
-async function taskOwnedByDevice(
+async function taskOwnedBy(
   env: Mob019Env,
   taskId: string,
-  deviceId: string,
+  owner: CaptureTaskOwner,
 ): Promise<boolean> {
+  const scope = captureTaskOwnerScope(owner);
   const row = await env.DB.prepare(
-    'SELECT id FROM capture_tasks WHERE id = ? AND device_id = ? LIMIT 1',
+    `SELECT id FROM capture_tasks WHERE id = ? AND ${scope.whereSql} LIMIT 1`,
   )
-    .bind(taskId, deviceId)
+    .bind(taskId, ...scope.parameters)
     .first<{ id: string }>();
   return Boolean(row);
 }
-
 async function readAsset(
   env: Mob019Env,
   taskId: string,
@@ -679,17 +679,43 @@ async function retryStt(
   });
 }
 
+export async function handleCloudAudioProcessingRequest(
+  request: Request,
+  env: Mob019Env,
+  owner: CaptureTaskOwner,
+  requestId: string,
+): Promise<Response | null> {
+  return handleOwnedMob019Request(request, env, owner, requestId, false);
+}
+
 export async function handleMob019Request(
   request: Request,
   env: Mob019Env,
   device: { id: string },
   requestId: string,
 ): Promise<Response | null> {
-  const url = new URL(request.url);
+  return handleOwnedMob019Request(
+    request,
+    env,
+    { kind: 'legacy-device', legacyDeviceId: device.id },
+    requestId,
+    true,
+  );
+}
 
+async function handleOwnedMob019Request(
+  request: Request,
+  env: Mob019Env,
+  owner: CaptureTaskOwner,
+  requestId: string,
+  allowLegacyRetention: boolean,
+): Promise<Response | null> {
+  const url = new URL(request.url);
   const transcriptMatch = /^\/v1\/capture-tasks\/([^/]+)\/transcript$/.exec(url.pathname);
   const retryMatch = /^\/v1\/capture-tasks\/([^/]+)\/stt\/retry$/.exec(url.pathname);
-  const retentionMatch = /^\/v1\/capture-tasks\/([^/]+)\/audio\/retention$/.exec(url.pathname);
+  const retentionMatch = allowLegacyRetention
+    ? /^\/v1\/capture-tasks\/([^/]+)\/audio\/retention$/.exec(url.pathname)
+    : null;
   const match = transcriptMatch ?? retryMatch ?? retentionMatch;
   if (!match) return null;
 
@@ -697,7 +723,9 @@ export async function handleMob019Request(
   if (!taskId) {
     return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
   }
-  if (!(await taskOwnedByDevice(env, taskId, device.id))) {
+  // Authorize a signed Cloud account or the actual legacy device before
+  // consulting Transcript, R2 audio, retry state or a Workflow binding.
+  if (!(await taskOwnedBy(env, taskId, owner))) {
     return errorResponse(requestId, 404, 'task_not_found', 'CaptureTask not found');
   }
 
@@ -719,7 +747,6 @@ export async function handleMob019Request(
 
   return errorResponse(requestId, 405, 'method_not_allowed', 'Method not allowed', false, taskId);
 }
-
 async function markVerifyRunning(env: Mob019Env, taskId: string): Promise<void> {
   const now = new Date().toISOString();
   await env.DB.prepare(
@@ -875,6 +902,13 @@ export async function runMob019Workflow(
   payload: Mob019WorkflowPayload,
   step: Mob019WorkflowStep,
 ): Promise<{ ok: boolean }> {
+  // The Workflow is a trusted Worker binding, not an HTTP identity. Reject a
+  // mismatched task/objectKey payload before ANY stage mutation or R2 access.
+  const linkedAsset = await readAsset(env, payload.taskId, payload.objectKey);
+  if (!linkedAsset || linkedAsset.status !== 'confirmed' || linkedAsset.deleted_at) {
+    return { ok: false };
+  }
+
   if (payload.startStage !== 'transcribe') {
     const verified = await step.do('verify-audio', async () => {
       await markVerifyRunning(env, payload.taskId);
