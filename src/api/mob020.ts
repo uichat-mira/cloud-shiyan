@@ -14,6 +14,7 @@ import {
   SCENE_ID_PATTERN,
   validateSceneSpec,
 } from '../shared/scenes';
+import { resolveOwnedScene } from '../shared/sceneOwner';
 
 export interface Mob019WorkflowBinding {
   create(input?: { id?: string; params?: Record<string, unknown> }): Promise<unknown>;
@@ -104,7 +105,7 @@ type DraftRow = {
 
 type TaskSceneRow = {
   id: string;
-  device_id: string;
+  device_id: string | null;
   title: string;
   scene_id: string;
 };
@@ -341,32 +342,15 @@ async function readDraftByIdempotencyKey(
 
 async function resolveScene(
   env: Mob020Env,
-  deviceId: string,
+  deviceId: string | null,
   sceneId: string,
 ): Promise<SceneSpec | null> {
-  const builtIn = findBuiltInScene(sceneId);
-  if (builtIn) return builtIn;
+  // SHY-012 does not yet connect Cloud tasks to an owner-aware organize
+  // pipeline (SHY-014). Preserve the existing built-in Scene behavior when
+  // a Cloud task has no historical device_id; fail closed for custom Scenes.
+  if (deviceId === null) return findBuiltInScene(sceneId);
 
-  const row = await env.DB.prepare(
-    'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? AND id = ? LIMIT 1',
-  )
-    .bind(deviceId, sceneId)
-    .first<SceneRow>();
-  if (!row) return null;
-
-  let sections: unknown;
-  try {
-    sections = JSON.parse(row.sections_json);
-  } catch {
-    return null;
-  }
-  const scene = validateSceneSpec({
-    id: row.id,
-    name: row.name,
-    instruction: row.instruction,
-    sections,
-  });
-  return scene.ok ? scene.value : null;
+  return resolveOwnedScene(env.DB, { kind: 'legacy-device', legacyDeviceId: deviceId }, sceneId);
 }
 
 async function ensureStage(
