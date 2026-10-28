@@ -9,6 +9,7 @@ import type {
 } from '../shared/llm';
 import {
   BUILT_IN_SCENES,
+  findBuiltInScene,
   isReservedSceneId,
   SCENE_ID_PATTERN,
   validateSceneSpec,
@@ -104,7 +105,7 @@ type DraftRow = {
 
 type TaskSceneRow = {
   id: string;
-  device_id: string;
+  device_id: string | null;
   title: string;
   scene_id: string;
 };
@@ -341,11 +342,14 @@ async function readDraftByIdempotencyKey(
 
 async function resolveScene(
   env: Mob020Env,
-  deviceId: string,
+  deviceId: string | null,
   sceneId: string,
 ): Promise<SceneSpec | null> {
-  // Existing legacy callers keep the same scene table and owner; the shared
-  // resolver is also available to future Cloud API/Workflow consumers.
+  // SHY-012 does not yet connect Cloud tasks to an owner-aware organize
+  // pipeline (SHY-014). Preserve the existing built-in Scene behavior when
+  // a Cloud task has no historical device_id; fail closed for custom Scenes.
+  if (deviceId === null) return findBuiltInScene(sceneId);
+
   return resolveOwnedScene(env.DB, { kind: 'legacy-device', legacyDeviceId: deviceId }, sceneId);
 }
 
