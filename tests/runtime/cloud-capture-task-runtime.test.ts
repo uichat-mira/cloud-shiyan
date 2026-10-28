@@ -847,8 +847,6 @@ describe('Cloud-owned audio confirmation and retention', () => {
       `mira-device-${crypto.randomUUID()}`,
     );
     const closedRoutes: Array<{ method: string; path: string }> = [
-      { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/transcript` },
-      { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/stt/retry` },
       { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/scenes` },
       { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/destination` },
     ];
@@ -864,6 +862,17 @@ describe('Cloud-owned audio confirmation and retention', () => {
         ok: false,
         error: { code: 'cloud_identity_unmapped' },
       });
+    }
+    for (const route of [
+      { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/transcript` },
+      { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/stt/retry` },
+    ]) {
+      const response = await worker.fetch(new Request(`https://shiyan.test${route.path}`, {
+        method: route.method,
+        headers: { authorization: `Bearer ${cloudToken}` },
+      }));
+      expect(response.status).toBe(404);
+      expect(await responseJson(response)).toMatchObject({ error: { code: 'task_not_found' } });
     }
   });
 });
