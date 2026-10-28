@@ -9,6 +9,8 @@ import {
 
 const runtime = env as typeof env & {
   DB: D1Database;
+  AUDIO: R2Bucket;
+  CAPTURE_WORKFLOW: { get(id: string): Promise<unknown> };
   DEVICE_AUTH_PEPPER: string;
   CLOUD_AUTH_JWKS_URL: string;
 };
@@ -91,11 +93,8 @@ const readOwner = async (taskId: string): Promise<OwnerRow | null> =>
     .bind(taskId)
     .first<OwnerRow>();
 
-const seedLegacyTask = async (
-  credential: string,
-): Promise<{ deviceId: string; taskId: string }> => {
+const seedLegacyDevice = async (credential: string): Promise<string> => {
   const deviceId = `legacy-device-${crypto.randomUUID()}`;
-  const taskId = crypto.randomUUID();
   const timestamp = new Date().toISOString();
 
   await runtime.DB.prepare(
@@ -111,6 +110,16 @@ const seedLegacyTask = async (
       timestamp,
     )
     .run();
+
+  return deviceId;
+};
+
+const seedLegacyTask = async (
+  credential: string,
+): Promise<{ deviceId: string; taskId: string }> => {
+  const deviceId = await seedLegacyDevice(credential);
+  const taskId = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
 
   await runtime.DB.prepare(
     `INSERT INTO capture_tasks
@@ -446,5 +455,414 @@ describe('Cloud account-owned CaptureTask routes', () => {
       .bind(idempotencyKey)
       .first<{ count: number }>();
     expect(rows?.count).toBe(0);
+  });
+});
+
+type CreatedCaptureTask = {
+  taskId: string;
+  assetId: string;
+  objectKey: string;
+};
+
+const createOwnedTask = async (
+  token: string,
+  title = 'Cloud audio task',
+): Promise<CreatedCaptureTask> => {
+  const response = await worker.fetch(
+    createRequest(token, `cloud-audio-${crypto.randomUUID()}`, title),
+  );
+  expect(response.status).toBe(201);
+  const body = await responseJson(response);
+  return {
+    taskId: body.data.task.id as string,
+    assetId: body.data.upload.assetId as string,
+    objectKey: body.data.upload.objectKey as string,
+  };
+};
+
+const uploadAudio = async (
+  objectKey: string,
+  options: { contentType?: string; sizeBytes?: number } = {},
+): Promise<void> => {
+  await runtime.AUDIO.put(objectKey, new Uint8Array(options.sizeBytes ?? 32), {
+    httpMetadata: { contentType: options.contentType ?? 'audio/mpeg' },
+  });
+};
+
+const confirmAudioRequest = (
+  token: string,
+  taskId: string,
+  assetId: string,
+  idempotencyKey = `confirm-${crypto.randomUUID()}`,
+): Request =>
+  new Request(`https://shiyan.test/v1/capture-tasks/${taskId}/audio/confirm`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ assetId, idempotencyKey }),
+  });
+
+const retentionRequest = (
+  token: string,
+  taskId: string,
+  retained: boolean,
+  method = 'PUT',
+): Request =>
+  new Request(`https://shiyan.test/v1/capture-tasks/${taskId}/audio/retention`, {
+    method,
+    headers: {
+      authorization: `Bearer ${token}`,
+      'content-type': 'application/json',
+    },
+    body: JSON.stringify({ retained }),
+  });
+
+type AudioAssetState = {
+  status: string;
+  actual_size_bytes: number | null;
+  retained: number;
+  delete_after: string | null;
+  deleted_at: string | null;
+  confirm_idempotency_key: string | null;
+};
+
+const readAudioAsset = async (taskId: string): Promise<AudioAssetState | null> =>
+  runtime.DB.prepare(
+    `SELECT status, actual_size_bytes, retained, delete_after, deleted_at,
+            confirm_idempotency_key
+     FROM audio_assets WHERE task_id = ? ORDER BY created_at ASC LIMIT 1`,
+  )
+    .bind(taskId)
+    .first<AudioAssetState>();
+
+const captureWorkflowExists = async (taskId: string): Promise<boolean> => {
+  try {
+    await runtime.CAPTURE_WORKFLOW.get(`capture-${taskId}`);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+describe('Cloud-owned audio confirmation and retention', () => {
+  it('confirms, idempotently replays and sets retention for the owning account', async () => {
+    const accountId = `cloud-account-${crypto.randomUUID()}`;
+    const deviceId = `mira-device-${crypto.randomUUID()}`;
+    const token = await tokenFor(accountId, deviceId);
+    const created = await createOwnedTask(token);
+
+    await uploadAudio(created.objectKey);
+
+    const idempotencyKey = `confirm-${crypto.randomUUID()}`;
+    const confirmed = await worker.fetch(
+      confirmAudioRequest(token, created.taskId, created.assetId, idempotencyKey),
+    );
+    expect(confirmed.status).toBe(200);
+    const confirmedBody = await responseJson(confirmed);
+    expect(confirmedBody.ok).toBe(true);
+
+    const stages = confirmedBody.data.task.stages as Array<{
+      stage: string;
+      status: string;
+    }>;
+    expect(stages.find((stage) => stage.stage === 'upload')?.status).toBe('succeeded');
+    expect(stages.some((stage) => stage.stage === 'verify-audio')).toBe(true);
+
+    expect(await readAudioAsset(created.taskId)).toMatchObject({
+      status: 'confirmed',
+      actual_size_bytes: 32,
+      confirm_idempotency_key: idempotencyKey,
+      deleted_at: null,
+    });
+    expect(await captureWorkflowExists(created.taskId)).toBe(true);
+
+    const replay = await worker.fetch(
+      confirmAudioRequest(token, created.taskId, created.assetId, idempotencyKey),
+    );
+    expect(replay.status).toBe(200);
+
+    const conflict = await worker.fetch(
+      confirmAudioRequest(token, created.taskId, created.assetId, 'other-key'),
+    );
+    expect(conflict.status).toBe(409);
+    expect(await responseJson(conflict)).toMatchObject({
+      ok: false,
+      error: { code: 'asset_already_confirmed' },
+    });
+
+    const retained = await worker.fetch(
+      retentionRequest(token, created.taskId, true),
+    );
+    expect(retained.status).toBe(200);
+    const retainedBody = await responseJson(retained);
+    expect(retainedBody).toMatchObject({
+      ok: true,
+      data: { assetId: created.assetId, retained: true, deletedAt: null },
+    });
+    expect(retainedBody.data.deleteAfter).toEqual(expect.any(String));
+    expect((await readAudioAsset(created.taskId))?.retained).toBe(1);
+
+    const released = await worker.fetch(
+      retentionRequest(token, created.taskId, false),
+    );
+    expect(released.status).toBe(200);
+    expect(await responseJson(released)).toMatchObject({
+      ok: true,
+      data: { retained: false },
+    });
+    expect((await readAudioAsset(created.taskId))?.retained).toBe(0);
+  });
+
+  it('lets another device of the same account confirm and retain the task', async () => {
+    const accountId = `cloud-account-${crypto.randomUUID()}`;
+    const creatorDevice = `mira-device-${crypto.randomUUID()}`;
+    const secondDevice = `mira-device-${crypto.randomUUID()}`;
+    const created = await createOwnedTask(
+      await tokenFor(accountId, creatorDevice),
+    );
+    await uploadAudio(created.objectKey);
+
+    const secondToken = await tokenFor(accountId, secondDevice);
+    const confirmed = await worker.fetch(
+      confirmAudioRequest(secondToken, created.taskId, created.assetId),
+    );
+    expect(confirmed.status).toBe(200);
+    expect(await responseJson(confirmed)).toMatchObject({
+      ok: true,
+      data: { task: { id: created.taskId, deviceId: creatorDevice } },
+    });
+
+    const retained = await worker.fetch(
+      retentionRequest(secondToken, created.taskId, true),
+    );
+    expect(retained.status).toBe(200);
+  });
+
+  it('denies foreign accounts, unknown ids, legacy tasks and wrong asset pairing without mutation', async () => {
+    const accountA = `cloud-account-${crypto.randomUUID()}`;
+    const accountB = `cloud-account-${crypto.randomUUID()}`;
+    const tokenA = await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`);
+    const tokenB = await tokenFor(accountB, `mira-device-${crypto.randomUUID()}`);
+
+    const taskA = await createOwnedTask(tokenA, 'Account A audio');
+    const taskA2 = await createOwnedTask(tokenA, 'Account A second audio');
+    await uploadAudio(taskA.objectKey);
+
+    const foreignConfirm = await worker.fetch(
+      confirmAudioRequest(tokenB, taskA.taskId, taskA.assetId),
+    );
+    expect(foreignConfirm.status).toBe(404);
+    expect(await responseJson(foreignConfirm)).toMatchObject({
+      ok: false,
+      error: { code: 'task_not_found', retryable: false },
+    });
+
+    const foreignRetention = await worker.fetch(
+      retentionRequest(tokenB, taskA.taskId, true),
+    );
+    expect(foreignRetention.status).toBe(404);
+    expect(await responseJson(foreignRetention)).toMatchObject({
+      ok: false,
+      error: { code: 'task_not_found' },
+    });
+
+    const foreignAsset = await worker.fetch(
+      confirmAudioRequest(tokenA, taskA.taskId, crypto.randomUUID()),
+    );
+    expect(foreignAsset.status).toBe(404);
+    expect(await responseJson(foreignAsset)).toMatchObject({
+      ok: false,
+      error: { code: 'asset_not_found' },
+    });
+
+    const wrongPairing = await worker.fetch(
+      confirmAudioRequest(tokenA, taskA.taskId, taskA2.assetId),
+    );
+    expect(wrongPairing.status).toBe(404);
+    expect(await responseJson(wrongPairing)).toMatchObject({
+      ok: false,
+      error: { code: 'asset_not_found' },
+    });
+
+    for (const target of [crypto.randomUUID(), taskA.taskId]) {
+      const unknownConfirm = await worker.fetch(
+        confirmAudioRequest(tokenA, target, crypto.randomUUID()),
+      );
+      expect(unknownConfirm.status).toBe(404);
+    }
+
+    const unknownRetention = await worker.fetch(
+      retentionRequest(tokenA, crypto.randomUUID(), true),
+    );
+    expect(unknownRetention.status).toBe(404);
+
+    const legacyCredential = `legacy-credential-${crypto.randomUUID()}`;
+    const legacy = await seedLegacyTask(legacyCredential);
+    const cloudConfirmLegacy = await worker.fetch(
+      confirmAudioRequest(tokenA, legacy.taskId, crypto.randomUUID()),
+    );
+    expect(cloudConfirmLegacy.status).toBe(404);
+    expect(await responseJson(cloudConfirmLegacy)).toMatchObject({
+      ok: false,
+      error: { code: 'task_not_found' },
+    });
+    const cloudRetentionLegacy = await worker.fetch(
+      retentionRequest(tokenA, legacy.taskId, true),
+    );
+    expect(cloudRetentionLegacy.status).toBe(404);
+
+    expect(await readAudioAsset(taskA.taskId)).toMatchObject({
+      status: 'awaiting_upload',
+      retained: 0,
+      confirm_idempotency_key: null,
+    });
+    expect(await captureWorkflowExists(taskA.taskId)).toBe(false);
+
+    const wrongScope = await worker.fetch(
+      confirmAudioRequest(
+        await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`, {
+          scope: ['relay:transport'],
+        }),
+        taskA.taskId,
+        taskA.assetId,
+      ),
+    );
+    expect(wrongScope.status).toBe(401);
+
+    const wrongAudience = await worker.fetch(
+      confirmAudioRequest(
+        await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`, {
+          aud: 'mira:cloud-relay-transport',
+        }),
+        taskA.taskId,
+        taskA.assetId,
+      ),
+    );
+    expect(wrongAudience.status).toBe(401);
+
+    const unauthenticated = await worker.fetch(
+      new Request(
+        `https://shiyan.test/v1/capture-tasks/${taskA.taskId}/audio/confirm`,
+        {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({
+            assetId: taskA.assetId,
+            idempotencyKey: 'unauth',
+          }),
+        },
+      ),
+    );
+    expect(unauthenticated.status).toBe(401);
+    expect(await readAudioAsset(taskA.taskId)).toMatchObject({
+      status: 'awaiting_upload',
+      retained: 0,
+      confirm_idempotency_key: null,
+    });
+  });
+
+  it('keeps established size, content-type and missing-object confirm errors', async () => {
+    const token = await tokenFor(
+      `cloud-account-${crypto.randomUUID()}`,
+      `mira-device-${crypto.randomUUID()}`,
+    );
+
+    const sizeTask = await createOwnedTask(token, 'Size mismatch');
+    await uploadAudio(sizeTask.objectKey, { sizeBytes: 16 });
+    const sizeMismatch = await worker.fetch(
+      confirmAudioRequest(token, sizeTask.taskId, sizeTask.assetId),
+    );
+    expect(sizeMismatch.status).toBe(409);
+    expect(await responseJson(sizeMismatch)).toMatchObject({
+      ok: false,
+      error: { code: 'audio_size_mismatch', retryable: true },
+    });
+    expect((await readAudioAsset(sizeTask.taskId))?.status).toBe('awaiting_upload');
+
+    const typeTask = await createOwnedTask(token, 'Type mismatch');
+    await uploadAudio(typeTask.objectKey, { contentType: 'audio/mp4' });
+    const typeMismatch = await worker.fetch(
+      confirmAudioRequest(token, typeTask.taskId, typeTask.assetId),
+    );
+    expect(typeMismatch.status).toBe(409);
+    expect(await responseJson(typeMismatch)).toMatchObject({
+      ok: false,
+      error: { code: 'audio_content_type_mismatch', retryable: false },
+    });
+    expect((await readAudioAsset(typeTask.taskId))?.status).toBe('awaiting_upload');
+
+    const missingTask = await createOwnedTask(token, 'Missing object');
+    const missingObject = await worker.fetch(
+      confirmAudioRequest(token, missingTask.taskId, missingTask.assetId),
+    );
+    expect(missingObject.status).toBe(409);
+    expect(await responseJson(missingObject)).toMatchObject({
+      ok: false,
+      error: { code: 'audio_object_missing', retryable: true },
+    });
+    expect((await readAudioAsset(missingTask.taskId))?.status).toBe('awaiting_upload');
+    expect(await captureWorkflowExists(missingTask.taskId)).toBe(false);
+  });
+
+  it('keeps legacy confirm/retention behavior and leaves other Cloud routes closed', async () => {
+    const credential = `legacy-credential-${crypto.randomUUID()}`;
+    const deviceId = await seedLegacyDevice(credential);
+
+    const created = await worker.fetch(
+      createRequest(credential, `legacy-audio-${crypto.randomUUID()}`),
+    );
+    expect(created.status).toBe(201);
+    const createdBody = await responseJson(created);
+    const legacyTaskId = createdBody.data.task.id as string;
+    expect(createdBody.data.task.deviceId).toBe(deviceId);
+    const upload = createdBody.data.upload as {
+      assetId: string;
+      objectKey: string;
+    };
+    await uploadAudio(upload.objectKey);
+
+    const confirmed = await worker.fetch(
+      confirmAudioRequest(credential, legacyTaskId, upload.assetId),
+    );
+    expect(confirmed.status).toBe(200);
+    expect(await responseJson(confirmed)).toMatchObject({
+      ok: true,
+      data: { task: { id: legacyTaskId, deviceId } },
+    });
+
+    const retained = await worker.fetch(
+      retentionRequest(credential, legacyTaskId, true),
+    );
+    expect(retained.status).toBe(200);
+    expect(await responseJson(retained)).toMatchObject({
+      ok: true,
+      data: { retained: true },
+    });
+
+    const cloudToken = await tokenFor(
+      `cloud-account-${crypto.randomUUID()}`,
+      `mira-device-${crypto.randomUUID()}`,
+    );
+    const closedRoutes: Array<{ method: string; path: string }> = [
+      { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/transcript` },
+      { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/stt/retry` },
+      { method: 'GET', path: `/v1/capture-tasks/${legacyTaskId}/scenes` },
+      { method: 'POST', path: `/v1/capture-tasks/${legacyTaskId}/destination` },
+    ];
+    for (const route of closedRoutes) {
+      const response = await worker.fetch(
+        new Request(`https://shiyan.test${route.path}`, {
+          method: route.method,
+          headers: { authorization: `Bearer ${cloudToken}` },
+        }),
+      );
+      expect(response.status).toBe(403);
+      expect(await responseJson(response)).toMatchObject({
+        ok: false,
+        error: { code: 'cloud_identity_unmapped' },
+      });
+    }
   });
 });
