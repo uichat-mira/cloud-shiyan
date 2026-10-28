@@ -9,11 +9,11 @@ import type {
 } from '../shared/llm';
 import {
   BUILT_IN_SCENES,
-  findBuiltInScene,
   isReservedSceneId,
   SCENE_ID_PATTERN,
   validateSceneSpec,
 } from '../shared/scenes';
+import { resolveOwnedScene } from '../shared/sceneOwner';
 
 export interface Mob019WorkflowBinding {
   create(input?: { id?: string; params?: Record<string, unknown> }): Promise<unknown>;
@@ -344,29 +344,9 @@ async function resolveScene(
   deviceId: string,
   sceneId: string,
 ): Promise<SceneSpec | null> {
-  const builtIn = findBuiltInScene(sceneId);
-  if (builtIn) return builtIn;
-
-  const row = await env.DB.prepare(
-    'SELECT id, name, instruction, sections_json FROM scenes WHERE device_id = ? AND id = ? LIMIT 1',
-  )
-    .bind(deviceId, sceneId)
-    .first<SceneRow>();
-  if (!row) return null;
-
-  let sections: unknown;
-  try {
-    sections = JSON.parse(row.sections_json);
-  } catch {
-    return null;
-  }
-  const scene = validateSceneSpec({
-    id: row.id,
-    name: row.name,
-    instruction: row.instruction,
-    sections,
-  });
-  return scene.ok ? scene.value : null;
+  // Existing legacy callers keep the same scene table and owner; the shared
+  // resolver is also available to future Cloud API/Workflow consumers.
+  return resolveOwnedScene(env.DB, { kind: 'legacy-device', legacyDeviceId: deviceId }, sceneId);
 }
 
 async function ensureStage(
