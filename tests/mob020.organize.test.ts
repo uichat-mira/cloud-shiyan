@@ -95,7 +95,7 @@ class FakeDb {
     string,
     {
       id: string;
-      device_id: string;
+      device_id: string | null;
       title: string;
       scene_id: string;
       lifecycle_status: string;
@@ -523,6 +523,36 @@ test('Workflow organizes the transcript into a versioned AI draft and marks the 
     db.statements.some(({ sql }) => sql.includes('INSERT INTO transcripts') || sql.includes('UPDATE transcripts')),
     false,
   );
+});
+
+test('Cloud task with null legacy device_id keeps built-in organize behavior until SHY-014', async () => {
+  const { env, db, llmCalls } = makeEnv();
+  db.tasks.get(TASK_ID)!.device_id = null;
+
+  const result = await runMob020Organize(env, { taskId: TASK_ID, requestId: 'cloud-built-in' }, step);
+
+  assert.equal(result.ok, true);
+  assert.equal(db.drafts.length, 1);
+  assert.equal(db.drafts[0].scene_id, 'meeting');
+  assert.equal(llmCalls.length, 1);
+  assert.equal((llmCalls[0].input.scene as { id: string }).id, 'meeting');
+  assert.equal(
+    db.statements.some(({ sql }) => sql.includes('FROM scenes') || sql.includes('FROM cloud_scenes')),
+    false,
+    'built-in selection must not consult a legacy device or a different account',
+  );
+});
+
+test('Cloud task with null legacy device_id fails closed for custom Scenes until SHY-014', async () => {
+  const { env, db, llmCalls } = makeEnv({ sceneId: 'standup' });
+  db.tasks.get(TASK_ID)!.device_id = null;
+
+  const result = await runMob020Organize(env, { taskId: TASK_ID, requestId: 'cloud-custom' }, step);
+
+  assert.equal(result.ok, false);
+  assert.equal(db.stages.get('organize')?.error_code, 'scene_not_found');
+  assert.equal(llmCalls.length, 0);
+  assert.equal(db.drafts.length, 0);
 });
 
 test('Replaying persist-ai-draft keeps the original draft version', async () => {
