@@ -24,34 +24,29 @@ const worker = exports.default as {
 const originalFetch = globalThis.fetch;
 let signingKey: TestSigningKey;
 
-const currentSeconds = (): number => Math.floor(Date.now() / 1000);
+// These fixtures deliberately share the canonical JWT claim/signing helpers.
+const sha256Hex = async (value: string): Promise<string> =>
+  Array.from(
+    new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value))),
+    (byte) => byte.toString(16).padStart(2, '0'),
+  ).join('');
 
-const sha256Hex = async (value: string): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    'SHA-256',
-    new TextEncoder().encode(value),
-  );
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, '0'))
-    .join('');
-};
-
-const tokenFor = async (
+const tokenFor = (
   accountId: string,
   deviceId: string,
   overrides: Record<string, unknown> = {},
-): Promise<string> =>
-  signTestCredential(
-    shiyanClaims({
-      sub: accountId,
-      device_id: deviceId,
-      iat: currentSeconds(),
-      nbf: currentSeconds(),
-      exp: currentSeconds() + 300,
-      ...overrides,
-    }),
-    signingKey,
-  );
+): Promise<string> => {
+  const issuedAt = Math.floor(Date.now() / 1000);
+  const claims = shiyanClaims({
+    sub: accountId,
+    device_id: deviceId,
+    iat: issuedAt,
+    nbf: issuedAt,
+    exp: issuedAt + 300,
+    ...overrides,
+  });
+  return signTestCredential(claims, signingKey);
+};
 
 const scenePayload = (id: string, instruction: string, name = 'Account scene') => ({
   id,
