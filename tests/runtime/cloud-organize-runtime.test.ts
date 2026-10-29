@@ -22,6 +22,7 @@ const worker = exports.default as {
 
 const originalFetch = globalThis.fetch;
 let signingKey: TestSigningKey;
+const llmPrompts: string[] = [];
 
 const currentSeconds = (): number => Math.floor(Date.now() / 1000);
 
@@ -48,10 +49,19 @@ const tokenFor = (
     signingKey,
   );
 
-const requestWith = (path: string, token: string, method = 'GET'): Request =>
+const requestWith = (
+  path: string,
+  token: string,
+  method = 'GET',
+  body?: unknown,
+): Request =>
   new Request(`https://shiyan.test${path}`, {
     method,
-    headers: { authorization: `Bearer ${token}` },
+    headers: {
+      authorization: `Bearer ${token}`,
+      ...(body === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
 
 const responseJson = async (response: Response): Promise<Record<string, any>> =>
@@ -169,6 +179,51 @@ const workflowExists = async (id: string): Promise<boolean> => {
   }
 };
 
+const fixtureLlmResponse = (init?: RequestInit): Response => {
+  const payload = JSON.parse(String(init?.body ?? '{}')) as {
+    messages?: Array<{ role?: string; content?: unknown }>;
+  };
+  const userMessage = payload.messages?.find((message) => message.role === 'user');
+  const prompt =
+    typeof userMessage?.content === 'string'
+      ? userMessage.content
+      : JSON.stringify(userMessage?.content ?? '');
+  llmPrompts.push(prompt);
+
+  const sectionIds = [...prompt.matchAll(/^- id: ([a-z0-9-]+) \|/gmu)].map(
+    (match) => match[1],
+  );
+  const instruction = /Organize instruction: (.+)$/mu.exec(prompt)?.[1]?.trim();
+  const structured = {
+    summary: `fixture:${instruction ?? 'unknown'}`,
+    sections: sectionIds.map((id) => ({ id, items: [] })),
+  };
+
+  return Response.json({
+    id: `chatcmpl-${crypto.randomUUID()}`,
+    object: 'chat.completion',
+    created: currentSeconds(),
+    model: 'test-model',
+    choices: [
+      {
+        index: 0,
+        message: { role: 'assistant', content: JSON.stringify(structured) },
+        finish_reason: 'stop',
+      },
+    ],
+    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+  });
+};
+
+const countTaskDrafts = async (taskId: string): Promise<number> => {
+  const row = await runtime.DB.prepare(
+    'SELECT COUNT(*) AS count FROM drafts WHERE task_id = ?',
+  )
+    .bind(taskId)
+    .first<{ count: number }>();
+  return row?.count ?? 0;
+};
+
 beforeAll(async () => {
   signingKey = await createTestSigningKey('runtime-cloud-organize-key');
 
@@ -182,6 +237,9 @@ beforeAll(async () => {
     if (new URL(raw).href === new URL(runtime.CLOUD_AUTH_JWKS_URL).href) {
       return Promise.resolve(Response.json({ keys: [signingKey.publicJwk] }));
     }
+    if (raw.startsWith('https://example.invalid/')) {
+      return Promise.resolve(fixtureLlmResponse(init));
+    }
     return originalFetch(input, init);
   }) as typeof fetch;
 });
@@ -192,6 +250,7 @@ afterAll(() => {
 
 describe.sequential('Cloud organize, AI Draft read and organize retry', () => {
   it('organizes with the owner Scenes, shares the draft across account devices and isolates foreign callers', async () => {
+    llmPrompts.length = 0;
     const accountA = `cloud-account-${crypto.randomUUID()}`;
     const accountB = `cloud-account-${crypto.randomUUID()}`;
     const deviceA1 = `mira-device-${crypto.randomUUID()}`;
@@ -265,20 +324,136 @@ describe.sequential('Cloud organize, AI Draft read and organize retry', () => {
       error: { code: 'task_not_found' },
     });
 
-    for (const [path, method] of [
-      [`/v1/capture-tasks/${builtInTask}/ai-draft/adjust`, 'POST'],
-      [`/v1/capture-tasks/${builtInTask}/final-draft`, 'PUT'],
-      [`/v1/capture-tasks/${builtInTask}/final-draft`, 'GET'],
+    const draftsBeforeDenials = await countTaskDrafts(builtInTask);
+    for (const [token, label] of [
+      [tokenB, 'foreign account'],
+      [await tokenFor(accountB, deviceB), 'second foreign device'],
+      [legacyCredential, 'legacy device'],
     ] as const) {
-      const closed = await worker.fetch(requestWith(path, tokenA1, method));
-      expect(closed.status).toBe(403);
-      expect(await responseJson(closed)).toMatchObject({
-        error: { code: 'cloud_identity_unmapped' },
-      });
+      for (const [path, method] of [
+        [`/v1/capture-tasks/${builtInTask}/ai-draft/adjust`, 'POST'],
+        [`/v1/capture-tasks/${builtInTask}/final-draft`, 'PUT'],
+        [`/v1/capture-tasks/${builtInTask}/final-draft`, 'GET'],
+      ] as const) {
+        const deniedBody =
+          method === 'POST'
+            ? { instruction: 'denied', idempotencyKey: `denied-${crypto.randomUUID()}` }
+            : method === 'PUT'
+              ? { markdown: '# denied' }
+              : undefined;
+        const denied = await worker.fetch(
+          requestWith(path, token, method, deniedBody),
+        );
+        expect(denied.status, `${label} ${method} ${path}`).toBe(404);
+        expect(await responseJson(denied)).toMatchObject({
+          error: { code: 'task_not_found' },
+        });
+      }
     }
+    const unknownAdjustTask = crypto.randomUUID();
+    for (const [path, method] of [
+      [`/v1/capture-tasks/${unknownAdjustTask}/ai-draft/adjust`, 'POST'],
+      [`/v1/capture-tasks/${unknownAdjustTask}/final-draft`, 'PUT'],
+      [`/v1/capture-tasks/${unknownAdjustTask}/final-draft`, 'GET'],
+    ] as const) {
+      const denied = await worker.fetch(requestWith(path, tokenA1, method));
+      expect(denied.status, `${method} ${path}`).toBe(404);
+    }
+    expect(await countTaskDrafts(builtInTask)).toBe(draftsBeforeDenials);
+    expect(llmPrompts).toHaveLength(0);
+
+    const adjustPath = `/v1/capture-tasks/${builtInTask}/ai-draft/adjust`;
+    const adjustBody = { instruction: 'Make todos concrete', idempotencyKey: 'runtime-adj-1' };
+    const adjusted = await worker.fetch(
+      requestWith(adjustPath, tokenA2, 'POST', adjustBody),
+    );
+    expect(adjusted.status).toBe(200);
+    expect(await responseJson(adjusted)).toMatchObject({
+      ok: true,
+      data: {
+        draft: {
+          taskId: builtInTask,
+          version: 2,
+          source: 'adjust',
+          baseVersion: 1,
+          sceneId: 'meeting',
+        },
+      },
+    });
+    expect(llmPrompts).toHaveLength(1);
+    expect(llmPrompts[0]).toContain('Owned transcript for organize');
+    expect(llmPrompts[0]).toContain('Make todos concrete');
+
+    const replay = await worker.fetch(
+      requestWith(adjustPath, tokenA1, 'POST', adjustBody),
+    );
+    expect(replay.status).toBe(200);
+    expect(await responseJson(replay)).toMatchObject({
+      data: { draft: { version: 2 } },
+    });
+    expect(llmPrompts).toHaveLength(1);
+
+    const conflict = await worker.fetch(
+      requestWith(adjustPath, tokenA1, 'POST', {
+        instruction: 'A different instruction',
+        idempotencyKey: 'runtime-adj-1',
+      }),
+    );
+    expect(conflict.status).toBe(409);
+    expect(await responseJson(conflict)).toMatchObject({
+      error: { code: 'idempotency_content_conflict' },
+    });
+    expect(llmPrompts).toHaveLength(1);
+
+    const finalPath = `/v1/capture-tasks/${builtInTask}/final-draft`;
+    const notSaved = await worker.fetch(requestWith(finalPath, tokenA2));
+    expect(notSaved.status).toBe(404);
+    expect(await responseJson(notSaved)).toMatchObject({
+      error: { code: 'final_draft_not_ready' },
+    });
+
+    const saved = await worker.fetch(
+      requestWith(finalPath, tokenA2, 'PUT', {
+        markdown: '# Edited\n\nHuman final draft.',
+        title: 'Edited title',
+      }),
+    );
+    expect(saved.status).toBe(200);
+    expect(await responseJson(saved)).toMatchObject({
+      ok: true,
+      data: {
+        draft: {
+          kind: 'final',
+          taskId: builtInTask,
+          version: 1,
+          title: 'Edited title',
+          markdown: '# Edited\n\nHuman final draft.',
+          baseVersion: 2,
+        },
+      },
+    });
+
+    const sharedFinal = await worker.fetch(requestWith(finalPath, tokenA1));
+    expect(sharedFinal.status).toBe(200);
+    expect(await responseJson(sharedFinal)).toMatchObject({
+      data: { draft: { markdown: '# Edited\n\nHuman final draft.' } },
+    });
+    const beforeForeignSave = await responseJson(
+      await worker.fetch(requestWith(finalPath, tokenA1)),
+    );
+    const foreignSave = await worker.fetch(
+      requestWith(finalPath, tokenB, 'PUT', { markdown: '# overwritten' }),
+    );
+    expect(foreignSave.status).toBe(404);
+    const afterForeignSave = await responseJson(
+      await worker.fetch(requestWith(finalPath, tokenA1)),
+    );
+    expect(afterForeignSave.data.draft).toEqual(beforeForeignSave.data.draft);
+    expect(await countTaskDrafts(builtInTask)).toBe(3);
   });
 
   it('keeps Scene id collisions account-scoped and fails missing custom Scenes without fallback', async () => {
+    llmPrompts.length = 0;
     const accountA = `cloud-account-${crypto.randomUUID()}`;
     const accountB = `cloud-account-${crypto.randomUUID()}`;
     const tokenA = await tokenFor(accountA, `mira-device-${crypto.randomUUID()}`);
@@ -303,6 +478,53 @@ describe.sequential('Cloud organize, AI Draft read and organize retry', () => {
       (await runMob020Organize(envForRun, { taskId: taskB }, step)).ok,
     ).toBe(true);
     expect(calls[1]).toMatchObject({ sceneId, instruction: 'private-B' });
+
+    llmPrompts.length = 0;
+    const adjustA = await worker.fetch(
+      requestWith(`/v1/capture-tasks/${taskA}/ai-draft/adjust`, tokenA, 'POST', {
+        instruction: 'Adjust A only',
+        idempotencyKey: 'scene-private-a',
+      }),
+    );
+    expect(adjustA.status).toBe(200);
+    expect(await responseJson(adjustA)).toMatchObject({
+      data: { draft: { version: 2, sceneId } },
+    });
+    const adjustB = await worker.fetch(
+      requestWith(`/v1/capture-tasks/${taskB}/ai-draft/adjust`, tokenB, 'POST', {
+        instruction: 'Adjust B only',
+        idempotencyKey: 'scene-private-b',
+      }),
+    );
+    expect(adjustB.status).toBe(200);
+    expect(await responseJson(adjustB)).toMatchObject({
+      data: { draft: { version: 2, sceneId } },
+    });
+    expect(llmPrompts).toHaveLength(2);
+    expect(llmPrompts[0]).toContain('private-A');
+    expect(llmPrompts[0]).not.toContain('private-B');
+    expect(llmPrompts[1]).toContain('private-B');
+    expect(llmPrompts[1]).not.toContain('private-A');
+
+    const draftsBeforeMissingScene = await countTaskDrafts(taskA);
+    await runtime.DB.prepare(
+      'UPDATE capture_tasks SET scene_id = ? WHERE id = ?',
+    )
+      .bind('missing-adjust-scene', taskA)
+      .run();
+    llmPrompts.length = 0;
+    const missingSceneAdjust = await worker.fetch(
+      requestWith(`/v1/capture-tasks/${taskA}/ai-draft/adjust`, tokenA, 'POST', {
+        instruction: 'Must not leak another scene',
+        idempotencyKey: 'missing-adjust-scene',
+      }),
+    );
+    expect(missingSceneAdjust.status).toBe(409);
+    expect(await responseJson(missingSceneAdjust)).toMatchObject({
+      error: { code: 'scene_not_found' },
+    });
+    expect(llmPrompts).toHaveLength(0);
+    expect(await countTaskDrafts(taskA)).toBe(draftsBeforeMissingScene);
 
     const missingTask = await createTask(tokenA, 'missing-scene');
     await seedTranscript(missingTask);
