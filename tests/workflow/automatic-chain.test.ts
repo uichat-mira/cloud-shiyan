@@ -60,6 +60,11 @@ afterAll(() => {
 
 describe.sequential('SHY-009 automatic Worker Workflow', () => {
   it('lets a confirmed task trigger and complete STT plus account-owned organize automatically', async () => {
+    const aiBinding = (runtime as typeof runtime & {
+      AI?: { run(model: string, input: Record<string, unknown>): Promise<unknown> };
+    }).AI;
+    expect(aiBinding, 'test-only AI binding must reach Worker runtime').toBeDefined();
+    expect(typeof aiBinding?.run).toBe('function');
     const accountA = 'account-A-' + crypto.randomUUID();
     const accountB = 'account-B-' + crypto.randomUUID();
     const tokenA = await tokenFor(accountA);
