@@ -692,7 +692,7 @@ test('Invalid stored owner columns fail organize closed before any LLM call', as
   }
 });
 
-test('Cloud AI draft read and organize retry are owner-scoped and other AI routes stay closed', async () => {
+test('Cloud AI draft read, adjust, Final Draft and organize retry are owner-scoped', async () => {
   const { env, db, workflowCreates } = makeEnv();
   useCloudTask(db);
   const cloudOwner = {
@@ -758,14 +758,207 @@ test('Cloud AI draft read and organize retry are owner-scoped and other AI route
     [`/v1/capture-tasks/${TASK_ID}/final-draft`, 'PUT'],
     [`/v1/capture-tasks/${TASK_ID}/final-draft`, 'GET'],
   ] as const) {
-    const closed = await handleMob020CloudTaskRequest(
+    const denied = await handleMob020CloudTaskRequest(
       request(path, { method }),
       env,
-      cloudOwner,
-      'closed',
+      foreignOwner,
+      'foreign-denied',
     );
-    assert.equal(closed, null);
+    assert.equal(denied?.status, 404, `${method} ${path} must deny a foreign account`);
   }
+  assert.equal(db.drafts.length, 1);
+});
+
+test('Cloud AI adjust resolves the owner Scene and shares revisions across account devices', async () => {
+  const { env, db, llmCalls } = makeEnv({ sceneId: 'shared' });
+  useCloudTask(db, 'account-a', 'device-a1');
+  seedCloudScene(db, 'account-a', 'shared', 'account-a-private');
+  seedCloudScene(db, 'account-b', 'shared', 'account-b-private');
+
+  await runMob020Organize(env, { taskId: TASK_ID, requestId: 'organize-a' }, step);
+  assert.equal(llmCalls.length, 1);
+
+  const ownerA1 = {
+    kind: 'cloud-account' as const,
+    cloudAccountId: 'account-a',
+    cloudDeviceId: 'device-a1',
+  };
+  const ownerA2 = {
+    kind: 'cloud-account' as const,
+    cloudAccountId: 'account-a',
+    cloudDeviceId: 'device-a2',
+  };
+  const ownerB = {
+    kind: 'cloud-account' as const,
+    cloudAccountId: 'account-b',
+    cloudDeviceId: 'device-b',
+  };
+  const adjustBody = JSON.stringify({
+    instruction: '把待办写得更具体',
+    idempotencyKey: 'cloud-adj-1',
+  });
+  const adjust = (owner: typeof ownerA1, body = adjustBody, id = 'cloud-adjust') =>
+    handleMob020CloudTaskRequest(
+      request(`/v1/capture-tasks/${TASK_ID}/ai-draft/adjust`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body,
+      }),
+      env,
+      owner,
+      id,
+    );
+
+  const first = await adjust(ownerA1);
+  assert.equal(first?.status, 200);
+  const firstBody = (await first?.json()) as {
+    data: { draft: { version: number; source: string; baseVersion: number } };
+  };
+  assert.equal(firstBody.data.draft.version, 2);
+  assert.equal(firstBody.data.draft.source, 'adjust');
+  assert.equal(firstBody.data.draft.baseVersion, 1);
+  assert.equal(llmCalls.length, 2);
+  assert.equal(llmCalls[1].kind, 'adjustDraft');
+  assert.equal(llmCalls[1].input.instruction, '把待办写得更具体');
+  assert.equal(
+    (llmCalls[1].input.scene as { instruction: string }).instruction,
+    'account-a-private',
+  );
+
+  // The same account's second Cloud Device replays the same key without a
+  // second LLM call or a new draft row.
+  const replay = await adjust(ownerA2, adjustBody, 'cloud-adjust-replay');
+  assert.equal(replay?.status, 200);
+  const replayBody = (await replay?.json()) as {
+    data: { draft: { version: number } };
+  };
+  assert.equal(replayBody.data.draft.version, 2);
+  assert.equal(llmCalls.length, 2);
+  assert.equal(db.drafts.length, 2);
+
+  const conflict = await adjust(
+    ownerA2,
+    JSON.stringify({ instruction: '完全不同的指令', idempotencyKey: 'cloud-adj-1' }),
+    'cloud-adjust-conflict',
+  );
+  assert.equal(conflict?.status, 409);
+  assert.equal(
+    ((await conflict?.json()) as { error: { code: string } }).error.code,
+    'idempotency_content_conflict',
+  );
+  assert.equal(llmCalls.length, 2);
+  assert.equal(db.drafts.length, 2);
+
+  const foreign = await adjust(ownerB, undefined, 'cloud-adjust-foreign');
+  assert.equal(foreign?.status, 404);
+  assert.equal(llmCalls.length, 2);
+  assert.equal(db.drafts.length, 2);
+
+  const finalGet = (owner: typeof ownerA1, id: string) =>
+    handleMob020CloudTaskRequest(
+      request(`/v1/capture-tasks/${TASK_ID}/final-draft`),
+      env,
+      owner,
+      id,
+    );
+  const finalPut = (owner: typeof ownerA1, markdown: string, id: string) =>
+    handleMob020CloudTaskRequest(
+      request(`/v1/capture-tasks/${TASK_ID}/final-draft`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ markdown }),
+      }),
+      env,
+      owner,
+      id,
+    );
+
+  const notSaved = await finalGet(ownerA2, 'cloud-final-get-early');
+  assert.equal(notSaved?.status, 404);
+
+  const save = await finalPut(ownerA2, '# 周会\n\n人工最终稿。', 'cloud-final-save');
+  assert.equal(save?.status, 200);
+  const saveBody = (await save?.json()) as {
+    data: { draft: { version: number; baseVersion: number; confirmedAt: string } };
+  };
+  assert.equal(saveBody.data.draft.version, 1);
+  assert.equal(saveBody.data.draft.baseVersion, 2);
+  assert.equal(saveBody.data.draft.confirmedAt.length > 0, true);
+
+  const sharedRead = await finalGet(ownerA1, 'cloud-final-get');
+  assert.equal(sharedRead?.status, 200);
+  const sharedBody = (await sharedRead?.json()) as {
+    data: { draft: { markdown: string } };
+  };
+  assert.equal(sharedBody.data.draft.markdown, '# 周会\n\n人工最终稿。');
+
+  const finalBefore = db.drafts.find((draft) => draft.kind === 'final');
+  const foreignSave = await finalPut(ownerB, '# 越权覆盖', 'cloud-final-foreign');
+  assert.equal(foreignSave?.status, 404);
+  const finalAfter = db.drafts.find((draft) => draft.kind === 'final');
+  assert.equal(finalAfter?.markdown, finalBefore?.markdown);
+  assert.equal(finalAfter?.confirmed_at, finalBefore?.confirmed_at);
+
+  const adjustAfterFinal = await adjust(
+    ownerA2,
+    JSON.stringify({ instruction: '再精简一点', idempotencyKey: 'cloud-adj-2' }),
+    'cloud-adjust-after-final',
+  );
+  assert.equal(adjustAfterFinal?.status, 200);
+  assert.equal(
+    ((await adjustAfterFinal?.json()) as { data: { draft: { version: number } } }).data.draft
+      .version,
+    3,
+  );
+  assert.equal(
+    db.drafts.find((draft) => draft.kind === 'final')?.markdown,
+    '# 周会\n\n人工最终稿。',
+  );
+});
+
+test('Cloud AI adjust fails closed when its custom Scene is missing', async () => {
+  const { env, db, llmCalls } = makeEnv({ sceneId: 'shared' });
+  useCloudTask(db, 'account-a');
+  seedCloudScene(db, 'account-a', 'shared', 'account-a-private');
+  await runMob020Organize(env, { taskId: TASK_ID, requestId: 'organize-a' }, step);
+  assert.equal(llmCalls.length, 1);
+
+  seedCloudScene(db, 'account-b', 'shared', 'account-b-private');
+  db.scenes.set(`${DEVICE_ID}:shared`, {
+    id: 'shared',
+    device_id: DEVICE_ID,
+    user_id: null,
+    name: 'Legacy shared',
+    instruction: 'legacy-private',
+    sections_json: JSON.stringify([
+      { id: 'points', title: '要点', description: '保留重点' },
+    ]),
+    created_at: NOW,
+    updated_at: NOW,
+  });
+  db.tasks.get(TASK_ID)!.scene_id = 'missing';
+
+  const response = await handleMob020CloudTaskRequest(
+    request(`/v1/capture-tasks/${TASK_ID}/ai-draft/adjust`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instruction: '泄露别人的场景', idempotencyKey: 'missing-scene' }),
+    }),
+    env,
+    {
+      kind: 'cloud-account',
+      cloudAccountId: 'account-a',
+      cloudDeviceId: CLOUD_DEVICE_ID,
+    },
+    'cloud-adjust-missing-scene',
+  );
+  assert.equal(response?.status, 409);
+  assert.equal(
+    ((await response?.json()) as { error: { code: string } }).error.code,
+    'scene_not_found',
+  );
+  assert.equal(llmCalls.length, 1);
+  assert.equal(db.drafts.length, 1);
 });
 
 test('Replaying persist-ai-draft keeps the original draft version', async () => {

@@ -9,7 +9,6 @@ import type {
 } from '../shared/llm';
 import {
   BUILT_IN_SCENES,
-  findBuiltInScene,
   isReservedSceneId,
   SCENE_ID_PATTERN,
   validateSceneSpec,
@@ -375,19 +374,6 @@ async function readDraftByIdempotencyKey(
   )
     .bind(taskId, idempotencyKey)
     .first<AiDraftRow>();
-}
-
-async function resolveScene(
-  env: Mob020Env,
-  deviceId: string | null,
-  sceneId: string,
-): Promise<SceneSpec | null> {
-  // SHY-012 does not yet connect Cloud tasks to an owner-aware organize
-  // pipeline (SHY-014). Preserve the existing built-in Scene behavior when
-  // a Cloud task has no historical device_id; fail closed for custom Scenes.
-  if (deviceId === null) return findBuiltInScene(sceneId);
-
-  return resolveOwnedScene(env.DB, { kind: 'legacy-device', legacyDeviceId: deviceId }, sceneId);
 }
 
 async function ensureStage(
@@ -845,6 +831,7 @@ const parseAdjustInput = (value: Record<string, unknown>): AdjustInput => {
 async function adjustAiDraft(
   request: Request,
   env: Mob020Env,
+  owner: CaptureTaskOwner,
   taskId: string,
   requestId: string,
 ): Promise<Response> {
@@ -912,7 +899,9 @@ async function adjustAiDraft(
     );
   }
 
-  const scene = await resolveScene(env, task.device_id, task.scene_id);
+  // Adjustments resolve custom Scenes through the already verified task owner,
+  // never a historical device id or a caller-supplied identity.
+  const scene = await resolveOwnedScene(env.DB, owner, task.scene_id);
   if (!scene) {
     return errorResponse(
       requestId,
@@ -1390,9 +1379,9 @@ export async function handleMob020SceneRequest(
 }
 
 /**
- * Cloud-owned AI Draft read and organize retry. Only these two routes are
- * exposed for a verified Cloud Account; AI adjust and Final Draft stay closed
- * until SHY-015. Ownership is checked before any Draft, LLM or Workflow IO.
+ * Cloud-owned AI Draft read/adjust, Final Draft read/save and organize retry.
+ * Ownership is checked with the shared owner SQL before any Draft, LLM or
+ * Workflow IO.
  */
 export async function handleMob020CloudTaskRequest(
   request: Request,
@@ -1402,10 +1391,16 @@ export async function handleMob020CloudTaskRequest(
 ): Promise<Response | null> {
   const url = new URL(request.url);
   const aiDraftMatch = /^\/v1\/capture-tasks\/([^/]+)\/ai-draft$/.exec(url.pathname);
+  const adjustMatch = /^\/v1\/capture-tasks\/([^/]+)\/ai-draft\/adjust$/.exec(
+    url.pathname,
+  );
   const retryMatch = /^\/v1\/capture-tasks\/([^/]+)\/organize\/retry$/.exec(
     url.pathname,
   );
-  const match = aiDraftMatch ?? retryMatch;
+  const finalDraftMatch = /^\/v1\/capture-tasks\/([^/]+)\/final-draft$/.exec(
+    url.pathname,
+  );
+  const match = aiDraftMatch ?? adjustMatch ?? retryMatch ?? finalDraftMatch;
   if (!match) return null;
 
   const taskId = parseTaskId(match[1]);
@@ -1419,8 +1414,17 @@ export async function handleMob020CloudTaskRequest(
   if (aiDraftMatch && request.method === 'GET') {
     return getAiDraft(env, taskId, requestId);
   }
+  if (adjustMatch && request.method === 'POST') {
+    return adjustAiDraft(request, env, owner, taskId, requestId);
+  }
   if (retryMatch && request.method === 'POST') {
     return retryOrganize(env, taskId, requestId);
+  }
+  if (finalDraftMatch && request.method === 'PUT') {
+    return saveFinalDraft(request, env, taskId, requestId);
+  }
+  if (finalDraftMatch && request.method === 'GET') {
+    return getFinalDraft(env, taskId, requestId);
   }
 
   return errorResponse(
@@ -1475,7 +1479,13 @@ export async function handleMob020Request(
     return getAiDraft(env, taskId, requestId);
   }
   if (adjustMatch && request.method === 'POST') {
-    return adjustAiDraft(request, env, taskId, requestId);
+    return adjustAiDraft(
+      request,
+      env,
+      { kind: 'legacy-device', legacyDeviceId: device.id },
+      taskId,
+      requestId,
+    );
   }
   if (retryMatch && request.method === 'POST') {
     return retryOrganize(env, taskId, requestId);
