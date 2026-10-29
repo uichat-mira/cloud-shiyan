@@ -17,6 +17,8 @@ import {
 import { resolveOwnedScene } from '../shared/sceneOwner';
 import {
   assertCaptureTaskOwner,
+  captureTaskOwnerFromRow,
+  captureTaskOwnerScope,
   type CaptureTaskOwner,
 } from '../shared/captureTaskOwner';
 
@@ -112,6 +114,12 @@ type TaskSceneRow = {
   device_id: string | null;
   title: string;
   scene_id: string;
+};
+
+type OrganizeTaskRow = TaskSceneRow & {
+  owner_kind: string;
+  cloud_account_id: string | null;
+  cloud_device_id: string | null;
 };
 
 // AI draft rows always carry provider telemetry: they only come from the
@@ -261,17 +269,29 @@ const toSceneView = (scene: SceneSpec, builtIn: boolean): SceneView => ({
   builtIn,
 });
 
+async function taskOwnedBy(
+  env: Mob020Env,
+  taskId: string,
+  owner: CaptureTaskOwner,
+): Promise<boolean> {
+  const scope = captureTaskOwnerScope(owner);
+  const row = await env.DB.prepare(
+    `SELECT id FROM capture_tasks WHERE id = ? AND ${scope.whereSql} LIMIT 1`,
+  )
+    .bind(taskId, ...scope.parameters)
+    .first<{ id: string }>();
+  return Boolean(row);
+}
+
 async function taskOwnedByDevice(
   env: Mob020Env,
   taskId: string,
   deviceId: string,
 ): Promise<boolean> {
-  const row = await env.DB.prepare(
-    'SELECT id FROM capture_tasks WHERE id = ? AND device_id = ? LIMIT 1',
-  )
-    .bind(taskId, deviceId)
-    .first<{ id: string }>();
-  return Boolean(row);
+  return taskOwnedBy(env, taskId, {
+    kind: 'legacy-device',
+    legacyDeviceId: deviceId,
+  });
 }
 
 async function readTaskScene(env: Mob020Env, taskId: string): Promise<TaskSceneRow | null> {
@@ -280,6 +300,19 @@ async function readTaskScene(env: Mob020Env, taskId: string): Promise<TaskSceneR
   )
     .bind(taskId)
     .first<TaskSceneRow>();
+}
+
+async function readOrganizeTask(
+  env: Mob020Env,
+  taskId: string,
+): Promise<OrganizeTaskRow | null> {
+  return env.DB.prepare(
+    `SELECT id, owner_kind, device_id, cloud_account_id, cloud_device_id,
+            title, scene_id
+     FROM capture_tasks WHERE id = ? LIMIT 1`,
+  )
+    .bind(taskId)
+    .first<OrganizeTaskRow>();
 }
 
 async function readTranscriptText(
@@ -513,7 +546,7 @@ async function runOrganizeStep(
     return { ok: false, errorCode: failure.code };
   };
 
-  const task = await readTaskScene(env, input.taskId);
+  const task = await readOrganizeTask(env, input.taskId);
   if (!task) {
     return failed({
       kind: 'terminal',
@@ -531,7 +564,21 @@ async function runOrganizeStep(
     });
   }
 
-  const scene = await resolveScene(env, task.device_id, task.scene_id);
+  // The stored owner columns are the only trusted owner source inside the
+  // Workflow. A Cloud task resolves custom Scenes by its verified Cloud
+  // Account; a legacy task keeps its historical device scope.
+  let owner: CaptureTaskOwner;
+  try {
+    owner = captureTaskOwnerFromRow(task);
+  } catch {
+    return failed({
+      kind: 'terminal',
+      code: 'owner_invalid',
+      message: 'CaptureTask owner columns are invalid',
+    });
+  }
+
+  const scene = await resolveOwnedScene(env.DB, owner, task.scene_id);
   if (!scene) {
     return failed({
       kind: 'terminal',
@@ -1340,6 +1387,50 @@ export async function handleMob020SceneRequest(
     return listScenes(env, owner, requestId);
   }
   return null;
+}
+
+/**
+ * Cloud-owned AI Draft read and organize retry. Only these two routes are
+ * exposed for a verified Cloud Account; AI adjust and Final Draft stay closed
+ * until SHY-015. Ownership is checked before any Draft, LLM or Workflow IO.
+ */
+export async function handleMob020CloudTaskRequest(
+  request: Request,
+  env: Mob020Env,
+  owner: CaptureTaskOwner,
+  requestId: string,
+): Promise<Response | null> {
+  const url = new URL(request.url);
+  const aiDraftMatch = /^\/v1\/capture-tasks\/([^/]+)\/ai-draft$/.exec(url.pathname);
+  const retryMatch = /^\/v1\/capture-tasks\/([^/]+)\/organize\/retry$/.exec(
+    url.pathname,
+  );
+  const match = aiDraftMatch ?? retryMatch;
+  if (!match) return null;
+
+  const taskId = parseTaskId(match[1]);
+  if (!taskId) {
+    return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
+  }
+  if (!(await taskOwnedBy(env, taskId, owner))) {
+    return errorResponse(requestId, 404, 'task_not_found', 'CaptureTask not found');
+  }
+
+  if (aiDraftMatch && request.method === 'GET') {
+    return getAiDraft(env, taskId, requestId);
+  }
+  if (retryMatch && request.method === 'POST') {
+    return retryOrganize(env, taskId, requestId);
+  }
+
+  return errorResponse(
+    requestId,
+    405,
+    'method_not_allowed',
+    'Method not allowed',
+    false,
+    taskId,
+  );
 }
 
 export async function handleMob020Request(

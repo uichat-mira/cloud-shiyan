@@ -10,6 +10,7 @@ import {
   type Mob019WorkflowStep,
 } from './mob019';
 import {
+  handleMob020CloudTaskRequest,
   handleMob020Request,
   handleMob020SceneRequest,
   runMob020Organize,
@@ -715,6 +716,14 @@ async function handleCloudShiyanRequest(
     }
     return confirmAudio(request, env, owner, taskId, requestId);
   }
+
+  const aiDraftResponse = await handleMob020CloudTaskRequest(
+    request,
+    withLlm(env),
+    owner,
+    requestId,
+  );
+  if (aiDraftResponse) return aiDraftResponse;
 
   const sceneResponse = await handleMob020SceneRequest(
     request,
