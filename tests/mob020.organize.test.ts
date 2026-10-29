@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  handleMob020CloudTaskRequest,
   handleMob020Request,
   runMob020Organize,
   type Mob020Env,
@@ -11,6 +12,8 @@ const TASK_ID = '11111111-1111-4111-8111-111111111111';
 const OTHER_DEVICE_TASK_ID = '33333333-3333-4333-8333-333333333333';
 const DEVICE_ID = 'device-1';
 const OTHER_DEVICE_ID = 'device-2';
+const CLOUD_ACCOUNT_ID = 'cloud-account-1';
+const CLOUD_DEVICE_ID = 'mira-device-1';
 const NOW = '2026-08-29T03:00:00.000Z';
 
 const TRANSCRIPT_TEXT = '今天会议讨论了灰度计划。';
@@ -95,7 +98,10 @@ class FakeDb {
     string,
     {
       id: string;
+      owner_kind: 'legacy-device' | 'cloud-account';
       device_id: string | null;
+      cloud_account_id: string | null;
+      cloud_device_id: string | null;
       title: string;
       scene_id: string;
       lifecycle_status: string;
@@ -105,13 +111,17 @@ class FakeDb {
   readonly stages = new Map<string, StageState>();
   readonly drafts: DraftRow[] = [];
   readonly scenes = new Map<string, SceneRecord>();
+  readonly cloudScenes = new Map<string, SceneRecord>();
   transcript: { task_id: string; text: string; language: string | null } | null = null;
   failNextDraftInsert = false;
 
   constructor() {
     this.tasks.set(TASK_ID, {
       id: TASK_ID,
+      owner_kind: 'legacy-device',
       device_id: DEVICE_ID,
+      cloud_account_id: null,
+      cloud_device_id: null,
       title: '周会',
       scene_id: 'meeting',
       lifecycle_status: 'active',
@@ -119,7 +129,10 @@ class FakeDb {
     });
     this.tasks.set(OTHER_DEVICE_TASK_ID, {
       id: OTHER_DEVICE_TASK_ID,
+      owner_kind: 'legacy-device',
       device_id: OTHER_DEVICE_ID,
+      cloud_account_id: null,
+      cloud_device_id: null,
       title: '别人家的会',
       scene_id: 'meeting',
       lifecycle_status: 'active',
@@ -144,22 +157,23 @@ class FakeDb {
   }
 
   first(sql: string, values: unknown[]): unknown {
-    if (sql.includes('FROM capture_tasks') && sql.includes('device_id = ?')) {
-      const [taskId, deviceId] = values as [string, string];
+    if (sql.includes('FROM capture_tasks') && sql.includes('owner_kind =')) {
+      const [taskId, ownerId] = values as [string, string];
       const task = this.tasks.get(taskId);
-      return task && task.device_id === deviceId ? { id: taskId } : null;
+      if (!task) return null;
+      if (sql.includes("owner_kind = 'cloud-account'")) {
+        return task.owner_kind === 'cloud-account' && task.cloud_account_id === ownerId
+          ? { id: taskId }
+          : null;
+      }
+      return task.owner_kind === 'legacy-device' && task.device_id === ownerId
+        ? { id: taskId }
+        : null;
     }
 
     if (sql.includes('FROM capture_tasks')) {
       const task = this.tasks.get(values[0] as string);
-      return task
-        ? {
-            id: task.id,
-            device_id: task.device_id,
-            title: task.title,
-            scene_id: task.scene_id,
-          }
-        : null;
+      return task ? { ...task } : null;
     }
 
     if (sql.includes('FROM transcripts')) {
@@ -202,6 +216,12 @@ class FakeDb {
     if (sql.includes('FROM capture_stages') && sql.includes("stage = 'organize'")) {
       const stage = this.stages.get('organize');
       return stage ? { ...stage } : null;
+    }
+
+    if (sql.includes('FROM cloud_scenes') && sql.includes('id = ?')) {
+      const [accountId, sceneId] = values as [string, string];
+      const scene = this.cloudScenes.get(`${accountId}:${sceneId}`);
+      return scene ? { ...scene } : null;
     }
 
     if (sql.includes('FROM scenes') && sql.includes('id = ?')) {
@@ -525,9 +545,41 @@ test('Workflow organizes the transcript into a versioned AI draft and marks the 
   );
 });
 
-test('Cloud task with null legacy device_id keeps built-in organize behavior until SHY-014', async () => {
+const useCloudTask = (
+  db: FakeDb,
+  accountId = CLOUD_ACCOUNT_ID,
+  cloudDeviceId = CLOUD_DEVICE_ID,
+): void => {
+  const task = db.tasks.get(TASK_ID)!;
+  task.owner_kind = 'cloud-account';
+  task.device_id = null;
+  task.cloud_account_id = accountId;
+  task.cloud_device_id = cloudDeviceId;
+};
+
+const seedCloudScene = (
+  db: FakeDb,
+  accountId: string,
+  id: string,
+  instruction: string,
+): void => {
+  db.cloudScenes.set(`${accountId}:${id}`, {
+    id,
+    device_id: accountId,
+    user_id: null,
+    name: 'Cloud custom',
+    instruction,
+    sections_json: JSON.stringify([
+      { id: 'points', title: '要点', description: '保留重点' },
+    ]),
+    created_at: NOW,
+    updated_at: NOW,
+  });
+};
+
+test('Cloud-owned task organizes with a built-in Scene without consulting any Scene table', async () => {
   const { env, db, llmCalls } = makeEnv();
-  db.tasks.get(TASK_ID)!.device_id = null;
+  useCloudTask(db);
 
   const result = await runMob020Organize(env, { taskId: TASK_ID, requestId: 'cloud-built-in' }, step);
 
@@ -543,16 +595,177 @@ test('Cloud task with null legacy device_id keeps built-in organize behavior unt
   );
 });
 
-test('Cloud task with null legacy device_id fails closed for custom Scenes until SHY-014', async () => {
+test('Cloud-owned task resolves its own custom Scene by verified account', async () => {
   const { env, db, llmCalls } = makeEnv({ sceneId: 'standup' });
-  db.tasks.get(TASK_ID)!.device_id = null;
+  useCloudTask(db);
+  seedCloudScene(db, CLOUD_ACCOUNT_ID, 'standup', '整理云端站会。');
 
-  const result = await runMob020Organize(env, { taskId: TASK_ID, requestId: 'cloud-custom' }, step);
+  const result = await runMob020Organize(
+    env,
+    { taskId: TASK_ID, requestId: 'cloud-custom' },
+    step,
+  );
+
+  assert.equal(result.ok, true);
+  const scene = llmCalls[0].input.scene as { id: string; instruction: string };
+  assert.equal(scene.id, 'standup');
+  assert.equal(scene.instruction, '整理云端站会。');
+  assert.equal(db.drafts[0].scene_id, 'standup');
+  assert.equal(
+    db.statements.some(({ sql }) => sql.includes('FROM scenes') && !sql.includes('cloud_scenes')),
+    false,
+    'a Cloud task must never read the legacy scenes table',
+  );
+});
+
+test('Cloud task missing its custom Scene fails closed without using another owner scene', async () => {
+  const { env, db, llmCalls } = makeEnv({ sceneId: 'standup' });
+  useCloudTask(db);
+  // A legacy device and a different account happen to own the same scene id.
+  db.scenes.set(`${DEVICE_ID}:standup`, {
+    id: 'standup',
+    device_id: DEVICE_ID,
+    user_id: null,
+    name: 'Legacy standup',
+    instruction: 'legacy-private',
+    sections_json: JSON.stringify([
+      { id: 'points', title: '要点', description: '保留重点' },
+    ]),
+    created_at: NOW,
+    updated_at: NOW,
+  });
+  seedCloudScene(db, 'another-account', 'standup', 'other-account-private');
+
+  const result = await runMob020Organize(
+    env,
+    { taskId: TASK_ID, requestId: 'cloud-missing' },
+    step,
+  );
 
   assert.equal(result.ok, false);
   assert.equal(db.stages.get('organize')?.error_code, 'scene_not_found');
   assert.equal(llmCalls.length, 0);
   assert.equal(db.drafts.length, 0);
+});
+
+test('Scene id collisions never redirect one account content to another', async () => {
+  const { env, db, llmCalls } = makeEnv({ sceneId: 'shared' });
+  useCloudTask(db, 'account-a');
+  seedCloudScene(db, 'account-a', 'shared', 'account-a-private');
+  seedCloudScene(db, 'account-b', 'shared', 'account-b-private');
+
+  await runMob020Organize(env, { taskId: TASK_ID, requestId: 'a' }, step);
+  assert.equal(
+    (llmCalls[0].input.scene as { instruction: string }).instruction,
+    'account-a-private',
+  );
+
+  useCloudTask(db, 'account-b');
+  await runMob020Organize(env, { taskId: TASK_ID, requestId: 'b' }, step);
+  assert.equal(
+    (llmCalls[1].input.scene as { instruction: string }).instruction,
+    'account-b-private',
+  );
+});
+
+test('Invalid stored owner columns fail organize closed before any LLM call', async () => {
+  const invalidRows = [
+    { owner_kind: 'unknown', device_id: DEVICE_ID, cloud_account_id: null, cloud_device_id: null },
+    {
+      owner_kind: 'cloud-account',
+      device_id: DEVICE_ID,
+      cloud_account_id: CLOUD_ACCOUNT_ID,
+      cloud_device_id: CLOUD_DEVICE_ID,
+    },
+  ];
+
+  for (const invalid of invalidRows) {
+    const { env, db, llmCalls } = makeEnv();
+    Object.assign(db.tasks.get(TASK_ID)!, invalid);
+
+    const result = await runMob020Organize(env, { taskId: TASK_ID }, step);
+
+    assert.equal(result.ok, false);
+    assert.equal(db.stages.get('organize')?.error_code, 'owner_invalid');
+    assert.equal(llmCalls.length, 0);
+    assert.equal(db.drafts.length, 0);
+  }
+});
+
+test('Cloud AI draft read and organize retry are owner-scoped and other AI routes stay closed', async () => {
+  const { env, db, workflowCreates } = makeEnv();
+  useCloudTask(db);
+  const cloudOwner = {
+    kind: 'cloud-account' as const,
+    cloudAccountId: CLOUD_ACCOUNT_ID,
+    cloudDeviceId: CLOUD_DEVICE_ID,
+  };
+
+  await runMob020Organize(env, { taskId: TASK_ID, requestId: 'req-1' }, step);
+
+  const draft = await handleMob020CloudTaskRequest(
+    request(`/v1/capture-tasks/${TASK_ID}/ai-draft`),
+    env,
+    cloudOwner,
+    'cloud-read',
+  );
+  assert.equal(draft?.status, 200);
+  assert.equal(
+    ((await draft?.json()) as { data: { draft: { version: number } } }).data.draft.version,
+    1,
+  );
+
+  const foreignOwner = {
+    kind: 'cloud-account' as const,
+    cloudAccountId: 'account-b',
+    cloudDeviceId: 'mira-device-b',
+  };
+  const foreignRead = await handleMob020CloudTaskRequest(
+    request(`/v1/capture-tasks/${TASK_ID}/ai-draft`),
+    env,
+    foreignOwner,
+    'foreign-read',
+  );
+  assert.equal(foreignRead?.status, 404);
+  const foreignRetry = await handleMob020CloudTaskRequest(
+    request(`/v1/capture-tasks/${TASK_ID}/organize/retry`, { method: 'POST' }),
+    env,
+    foreignOwner,
+    'foreign-retry',
+  );
+  assert.equal(foreignRetry?.status, 404);
+  assert.equal(workflowCreates.length, 0);
+
+  db.stages.set('organize', {
+    status: 'failed',
+    retryable: 1,
+    retry_count: 0,
+    error_code: 'rate_limited',
+    error_message: 'rate limited',
+  });
+  const retry = await handleMob020CloudTaskRequest(
+    request(`/v1/capture-tasks/${TASK_ID}/organize/retry`, { method: 'POST' }),
+    env,
+    cloudOwner,
+    'cloud-retry',
+  );
+  assert.equal(retry?.status, 200);
+  assert.equal(workflowCreates.length, 1);
+  assert.equal(workflowCreates[0].params?.startStage, 'organize');
+
+  for (const [path, method] of [
+    [`/v1/capture-tasks/${TASK_ID}/ai-draft/adjust`, 'POST'],
+    [`/v1/capture-tasks/${TASK_ID}/final-draft`, 'PUT'],
+    [`/v1/capture-tasks/${TASK_ID}/final-draft`, 'GET'],
+  ] as const) {
+    const closed = await handleMob020CloudTaskRequest(
+      request(path, { method }),
+      env,
+      cloudOwner,
+      'closed',
+    );
+    assert.equal(closed, null);
+  }
 });
 
 test('Replaying persist-ai-draft keeps the original draft version', async () => {

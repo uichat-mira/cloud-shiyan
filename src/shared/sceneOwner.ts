@@ -22,7 +22,7 @@ type StoredScene = {
  * owner. Cloud identity comes from signed Cloud Account sub, never a device id.
  *
  * This is an internal selector only: SHY-013 admits Cloud Scene HTTP routes;
- * SHY-014/015 will wire account-owned tasks into the organize/adjust path.
+ * SHY-014 wires account-owned tasks into the organize/persist path.
  */
 export async function resolveOwnedScene(
   db: CaptureTaskOwnerDatabase,
