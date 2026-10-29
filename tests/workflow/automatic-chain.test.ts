@@ -109,6 +109,12 @@ describe.sequential('SHY-009 automatic Worker Workflow', () => {
       ).bind(taskId).first<{
         task_id: string; text: string; source_asset_id: string; stt_artifact_key: string;
       }>();
+      const workflowStages = (await runtime.DB.prepare(
+        'SELECT stage, status, error_code, error_message FROM capture_stages WHERE task_id = ?',
+      ).bind(taskId).all()).results;
+      if (!transcript) {
+        throw new Error('Workflow complete without Transcript: ' + JSON.stringify(workflowStages));
+      }
       expect(transcript).toMatchObject({
         task_id: taskId,
         text: 'SHY009_AUTOMATIC_WORKFLOW_TRANSCRIPT',
