@@ -8,7 +8,7 @@ const rootDir = path.dirname(fileURLToPath(import.meta.url));
 /**
  * SHY-009 only: a self-contained automatic-Workflow test runtime.
  *
- * Workers AI is unavailable in local Miniflare. The wrapped binding provides
+ * Workers AI is unavailable in local Miniflare. The test-only RPC binding provides
  * only the external Whisper inference response. Workerd, Workflow scheduling,
  * every internal Workflow step, D1 and R2 remain real. Production Wrangler
  * settings and the ordinary, deliberately failing AI test binding are intact.
@@ -27,14 +27,15 @@ export default defineConfig({
             className: 'ShiyanCaptureWorkflow',
           },
         },
-        wrappedBindings: { AI: 'shiyan-whisper-fixture' },
+        serviceBindings: { AI: 'shiyan-whisper-fixture' },
         workers: [
           {
             name: 'shiyan-whisper-fixture',
             modules: true,
+            compatibilityDate: '2026-08-29',
             script: [
-              'export default function () {',
-              '  return {',
+              "import { WorkerEntrypoint } from 'cloudflare:workers';",
+              'export default class FixtureAI extends WorkerEntrypoint {',
               '    async run(model, input) {',
               "      if (model !== '@cf/openai/whisper-large-v3-turbo' || input?.task !== 'transcribe' || typeof input.audio !== 'string') {",
               "        throw new Error('Unexpected Workers AI inference');",
@@ -44,8 +45,7 @@ export default defineConfig({
               "        language: 'en',",
               "        segments: [{ start: 0, end: 1, text: 'SHY009_AUTOMATIC_WORKFLOW_TRANSCRIPT' }],",
               '      };',
-              '    },',
-              '  };',
+              '    }',
               '}',
             ].join('\n'),
           },
