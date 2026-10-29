@@ -6,6 +6,10 @@ import type {
   DestinationFailure,
   DestinationSuccess,
 } from '../shared/destination';
+import {
+  captureTaskOwnerScope,
+  type CaptureTaskOwner,
+} from '../shared/captureTaskOwner';
 import { GithubDestinationAdapter } from '../shared/githubDestination';
 
 export interface Mob022Env {
@@ -146,11 +150,16 @@ const toView = (row: DeliveryRow): DeliveryRecordView => ({
   updatedAt: row.updated_at,
 });
 
-async function taskOwnedByDevice(env: Mob022Env, taskId: string, deviceId: string): Promise<boolean> {
+async function taskOwnedBy(
+  env: Mob022Env,
+  taskId: string,
+  owner: CaptureTaskOwner,
+): Promise<boolean> {
+  const scope = captureTaskOwnerScope(owner);
   const row = await env.DB.prepare(
-    'SELECT id FROM capture_tasks WHERE id = ? AND device_id = ? LIMIT 1',
+    `SELECT id FROM capture_tasks WHERE id = ? AND ${scope.whereSql} LIMIT 1`,
   )
-    .bind(taskId, deviceId)
+    .bind(taskId, ...scope.parameters)
     .first<{ id: string }>();
   return Boolean(row);
 }
@@ -475,10 +484,16 @@ export async function deliverConfirmedFinalDraftToGithub(
   return executeDestinationDelivery(env, adapter, draft, idempotencyKey);
 }
 
+/**
+ * Delivery routes for an already authenticated owner. The typed owner scope is
+ * applied before any Final Draft, delivery history, GitHub adapter or
+ * delivery-record/stage write. Legacy devices keep their historical
+ * device-scoped behavior; Cloud Accounts are scoped by verified account `sub`.
+ */
 export async function handleMob022Request(
   request: Request,
   env: Mob022GithubEnv,
-  device: { id: string },
+  owner: CaptureTaskOwner,
   requestId: string,
 ): Promise<Response | null> {
   const url = new URL(request.url);
@@ -491,7 +506,7 @@ export async function handleMob022Request(
   if (!taskId) {
     return errorResponse(requestId, 400, 'invalid_task_id', 'Invalid CaptureTask id');
   }
-  if (!(await taskOwnedByDevice(env, taskId, device.id))) {
+  if (!(await taskOwnedBy(env, taskId, owner))) {
     return errorResponse(requestId, 404, 'task_not_found', 'CaptureTask not found');
   }
 

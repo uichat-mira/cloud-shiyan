@@ -62,11 +62,15 @@ class FakeStatement {
   }
 }
 
+type TaskOwner =
+  | { kind: 'legacy-device'; id: string }
+  | { kind: 'cloud-account'; id: string };
+
 class FakeDb {
   readonly deliveries = new Map<string, DeliveryRow>();
   deliveryStage = { status: 'pending', retryable: 1, retry_count: 0, error_code: null as string | null };
   currentStage = 'ready';
-  ownerDeviceId = 'device-1';
+  taskOwner: TaskOwner = { kind: 'legacy-device', id: 'device-1' };
   finalDraft: ConfirmedFinalDraftSnapshot | null = DRAFT;
 
   prepare(sql: string): FakeStatement {
@@ -79,8 +83,19 @@ class FakeDb {
   }
 
   first(sql: string, values: Array<string | number | null>): unknown {
-    if (sql.includes('FROM capture_tasks') && sql.includes('device_id = ?')) {
-      return values[0] === TASK_ID && values[1] === this.ownerDeviceId ? { id: TASK_ID } : null;
+    if (sql.includes('FROM capture_tasks') && sql.includes("owner_kind = 'legacy-device'")) {
+      return values[0] === TASK_ID &&
+        this.taskOwner.kind === 'legacy-device' &&
+        values[1] === this.taskOwner.id
+        ? { id: TASK_ID }
+        : null;
+    }
+    if (sql.includes('FROM capture_tasks') && sql.includes("owner_kind = 'cloud-account'")) {
+      return values[0] === TASK_ID &&
+        this.taskOwner.kind === 'cloud-account' &&
+        values[1] === this.taskOwner.id
+        ? { id: TASK_ID }
+        : null;
     }
     if (sql.includes('FROM capture_tasks') && sql.includes('WHERE id = ?')) {
       return values[0] === TASK_ID ? { id: TASK_ID } : null;
@@ -314,8 +329,8 @@ test('POST deliveries publishes the confirmed Final Draft and replays saved evid
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ destination: 'github', idempotencyKey: 'mobile-deliver-1' }),
       });
-    const first = await handleMob022Request(request(), githubEnvFor(db), { id: 'device-1' }, 'req-1');
-    const replay = await handleMob022Request(request(), githubEnvFor(db), { id: 'device-1' }, 'req-2');
+    const first = await handleMob022Request(request(), githubEnvFor(db), { kind: 'legacy-device', legacyDeviceId: 'device-1' }, 'req-1');
+    const replay = await handleMob022Request(request(), githubEnvFor(db), { kind: 'legacy-device', legacyDeviceId: 'device-1' }, 'req-2');
     assert.equal(first?.status, 200);
     assert.equal(replay?.status, 200);
     assert.equal(calls, 2);
@@ -336,7 +351,7 @@ test('POST deliveries requires a confirmed Final Draft', async () => {
       body: JSON.stringify({ destination: 'github', idempotencyKey: 'mobile-deliver-2' }),
     }),
     githubEnvFor(db),
-    { id: 'device-1' },
+    { kind: 'legacy-device', legacyDeviceId: 'device-1' },
     'req-3',
   );
   assert.equal(response?.status, 409);
@@ -348,9 +363,174 @@ test('delivery routes conceal tasks owned by another device', async () => {
   const response = await handleMob022Request(
     new Request(`https://api.example/v1/capture-tasks/${TASK_ID}/deliveries`),
     githubEnvFor(db),
-    { id: 'device-2' },
+    { kind: 'legacy-device', legacyDeviceId: 'device-2' },
     'req-4',
   );
   assert.equal(response?.status, 404);
   assert.equal(((await response?.json()) as { error: { code: string } }).error.code, 'task_not_found');
+});
+
+const cloudOwner = (accountId: string, cloudDeviceId = 'cloud-device-1') => ({
+  kind: 'cloud-account' as const,
+  cloudAccountId: accountId,
+  cloudDeviceId,
+});
+
+const cloudDeliveriesRequest = (
+  taskId: string,
+  method = 'GET',
+  body?: unknown,
+  query = '',
+): Request =>
+  new Request(`https://api.example/v1/capture-tasks/${taskId}/deliveries${query}`, {
+    method,
+    ...(body === undefined
+      ? {}
+      : {
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        }),
+  });
+
+test('Cloud account owner delivers once, lists the record and replays the same evidence', async () => {
+  const db = new FakeDb();
+  db.taskOwner = { kind: 'cloud-account', id: 'account-1' };
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; method?: string }> = [];
+  globalThis.fetch = async (input, init) => {
+    calls.push({ url: String(input), method: init?.method });
+    if (calls.length === 1) return new Response(null, { status: 404 });
+    return Response.json(
+      {
+        content: {
+          path: `entries/2026/08/${TASK_ID}.md`,
+          html_url: `https://github.com/dangjingtao/mira-shiyan/blob/main/entries/2026/08/${TASK_ID}.md`,
+        },
+        commit: { sha: 'commit-cloud-1' },
+      },
+      { status: 201 },
+    );
+  };
+
+  try {
+    const ownerA = cloudOwner('account-1');
+    const forgedBody = {
+      destination: 'github',
+      idempotencyKey: 'cloud-deliver-1',
+      accountId: 'account-2',
+      finalDraftId: 'forged-final-draft',
+      deliveryId: 'forged-delivery',
+      taskId: '22222222-2222-4222-8222-222222222222',
+    };
+    const first = await handleMob022Request(
+      cloudDeliveriesRequest(TASK_ID, 'POST', forgedBody),
+      githubEnvFor(db),
+      ownerA,
+      'req-cloud-1',
+    );
+    assert.equal(first?.status, 200);
+    const firstBody = (await first?.json()) as {
+      data: { taskId: string; record: Record<string, unknown>; delivery: { commitSha: string } };
+    };
+    assert.equal(firstBody.data.taskId, TASK_ID);
+    assert.equal(firstBody.data.record.finalDraftId, DRAFT.id);
+    assert.equal(firstBody.data.record.idempotencyKey, 'cloud-deliver-1');
+    assert.notEqual(firstBody.data.record.id, 'forged-delivery');
+    assert.equal(firstBody.data.delivery.commitSha, 'commit-cloud-1');
+
+    const listed = await handleMob022Request(
+      cloudDeliveriesRequest(TASK_ID, 'GET', undefined, '?deliveryId=forged-delivery'),
+      githubEnvFor(db),
+      ownerA,
+      'req-cloud-2',
+    );
+    assert.equal(listed?.status, 200);
+    const listedBody = (await listed?.json()) as {
+      data: { deliveries: Array<Record<string, unknown>> };
+    };
+    assert.equal(listedBody.data.deliveries.length, 1);
+    assert.equal(listedBody.data.deliveries[0]?.finalDraftId, DRAFT.id);
+    assert.equal(listedBody.data.deliveries[0]?.idempotencyKey, 'cloud-deliver-1');
+
+    const replay = await handleMob022Request(
+      cloudDeliveriesRequest(TASK_ID, 'POST', {
+        destination: 'github',
+        idempotencyKey: 'cloud-deliver-1',
+      }),
+      githubEnvFor(db),
+      cloudOwner('account-1', 'cloud-device-2'),
+      'req-cloud-3',
+    );
+    assert.equal(replay?.status, 200);
+    const replayBody = (await replay?.json()) as {
+      data: { record: { id: string }; delivery: { commitSha: string } };
+    };
+    assert.equal(replayBody.data.record.id, firstBody.data.record.id);
+    assert.equal(replayBody.data.delivery.commitSha, 'commit-cloud-1');
+
+    assert.equal(calls.length, 2);
+    assert.equal(db.deliveries.size, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('Cloud deliveries deny foreign accounts, legacy owners and unknown tasks without side effects', async () => {
+  const db = new FakeDb();
+  db.taskOwner = { kind: 'cloud-account', id: 'account-1' };
+  const originalFetch = globalThis.fetch;
+  let calls = 0;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return new Response(null, { status: 500 });
+  };
+  const unknownTaskId = '22222222-2222-4222-8222-222222222222';
+
+  try {
+    const deniedOwners = [
+      [cloudOwner('account-2'), TASK_ID, 'foreign account'],
+      [
+        { kind: 'legacy-device' as const, legacyDeviceId: 'device-1' },
+        TASK_ID,
+        'legacy owner',
+      ],
+      [cloudOwner('account-1'), unknownTaskId, 'unknown task'],
+    ] as const;
+
+    for (const [owner, taskId, label] of deniedOwners) {
+      for (const method of ['GET', 'POST'] as const) {
+        const response = await handleMob022Request(
+          cloudDeliveriesRequest(
+            taskId,
+            method,
+            method === 'POST'
+              ? { destination: 'github', idempotencyKey: `denied-${crypto.randomUUID()}` }
+              : undefined,
+          ),
+          githubEnvFor(db),
+          owner,
+          `req-denied-${crypto.randomUUID()}`,
+        );
+        assert.equal(response?.status, 404, `${label} ${method}`);
+        const bodyText = await response!.text();
+        assert.match(bodyText, /task_not_found/);
+        assert.doesNotMatch(bodyText, /Weekly review|Done\./);
+      }
+    }
+
+    db.taskOwner = { kind: 'legacy-device', id: 'device-1' };
+    const crossOwner = await handleMob022Request(
+      cloudDeliveriesRequest(TASK_ID),
+      githubEnvFor(db),
+      cloudOwner('account-1'),
+      'req-denied-cross',
+    );
+    assert.equal(crossOwner?.status, 404);
+
+    assert.equal(calls, 0);
+    assert.equal(db.deliveries.size, 0);
+    assert.equal(db.deliveryStage.status, 'pending');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
