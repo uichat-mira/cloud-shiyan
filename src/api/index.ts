@@ -749,6 +749,9 @@ async function handleCloudShiyanRequest(
   );
   if (processingResponse) return processingResponse;
 
+  const deliveriesResponse = await handleMob022Request(request, env, owner, requestId);
+  if (deliveriesResponse) return deliveriesResponse;
+
   return errorResponse(
     requestId,
     403,
@@ -868,7 +871,7 @@ export default {
     const mob020Response = await handleMob020Request(request, withLlm(env), device, requestId);
     if (mob020Response) return mob020Response;
 
-    const mob022Response = await handleMob022Request(request, env, device, requestId);
+    const mob022Response = await handleMob022Request(request, env, legacyOwner, requestId);
     if (mob022Response) return mob022Response;
 
     return errorResponse(requestId, 404, 'route_not_found', 'Route not found');
